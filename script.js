@@ -323,6 +323,36 @@ function addProduct(event) {
   saveState();
 }
 
+function updateProductPrice(event) {
+  event.preventDefault();
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can update price.");
+    return;
+  }
+
+  const sku = document.getElementById("priceSku").value.trim().toLowerCase();
+  const newPrice = Number(document.getElementById("newPrice").value);
+
+  if (!sku || Number.isNaN(newPrice) || newPrice < 0) {
+    alert("Enter valid SKU and price.");
+    return;
+  }
+
+  const product = state.products.find((p) => p.sku.toLowerCase() === sku);
+  if (!product) {
+    alert("Product not found for this SKU.");
+    return;
+  }
+
+  product.price = newPrice;
+  event.target.reset();
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+  saveState();
+}
+
 function clearHistory() {
   if (state.currentUser?.role !== "admin") {
     alert("Only admin can clear history.");
@@ -405,6 +435,7 @@ function init() {
   document.getElementById("amountReceived").addEventListener("input", renderCart);
   document.getElementById("checkoutForm").addEventListener("submit", completeSale);
   document.getElementById("productForm").addEventListener("submit", addProduct);
+  document.getElementById("priceForm").addEventListener("submit", updateProductPrice);
   document.getElementById("clearHistoryBtn").addEventListener("click", clearHistory);
   document.getElementById("newSaleBtn").addEventListener("click", resetCurrentSale);
   document.getElementById("loginForm").addEventListener("submit", handleLogin);
