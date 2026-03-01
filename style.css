@@ -103,7 +103,6 @@ h1 { margin-top: 0.2rem; }
 .inventory-admin[hidden] { display: none; }
 .inventory-form { margin-top: 0.8rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
 .inventory-form .btn { grid-column: span 2; }
-.compact-form { margin-top: 0.6rem; }
 
 .field { display: grid; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); }
 .field input,

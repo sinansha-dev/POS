@@ -345,16 +345,12 @@ function updateProductPrice(event) {
   }
 
   product.price = newPrice;
-  state.cart = state.cart.map((line) => (
-    line.productId === product.id ? { ...line, price: newPrice } : line
-  ));
   event.target.reset();
   renderProducts();
   renderCart();
   renderHistory();
   renderKPIs();
   saveState();
-  alert(`Price updated for ${product.name} (${product.sku}).`);
 }
 
 function clearHistory() {
