@@ -1,4 +1,4 @@
-const STORAGE_KEY = "novapos-state-v1";
+const STORAGE_KEY = "novapos-state-v2";
 
 const DEFAULT_PRODUCTS = [
   { id: crypto.randomUUID(), name: "Coffee 250g", sku: "CF-250", price: 8.5, stock: 42 },
@@ -8,10 +8,25 @@ const DEFAULT_PRODUCTS = [
   { id: crypto.randomUUID(), name: "Orange Juice", sku: "OJ-1L", price: 3.9, stock: 12 }
 ];
 
+const DEFAULT_USERS = [
+  { username: "admin", password: "admin123", role: "admin" },
+  { username: "cashier", password: "cash123", role: "user" }
+];
+
+const CURRENCY_LOCALES = {
+  USD: "en-US",
+  INR: "en-IN",
+  SAR: "en-SA"
+};
+
 const state = {
   products: [],
   cart: [],
-  history: []
+  history: [],
+  users: [],
+  currentUser: null,
+  currency: "USD",
+  theme: "light"
 };
 
 const productGrid = document.getElementById("productGrid");
@@ -19,16 +34,29 @@ const cartBody = document.getElementById("cartBody");
 const historyBody = document.getElementById("historyBody");
 const receiptContent = document.getElementById("receiptContent");
 const cashierNameInput = document.getElementById("cashierName");
+const inventoryAdmin = document.getElementById("inventoryAdmin");
+const currencySelect = document.getElementById("currencySelect");
+const darkModeBtn = document.getElementById("darkModeBtn");
+const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 function money(value) {
-  return `$${value.toFixed(2)}`;
+  const locale = CURRENCY_LOCALES[state.currency] || "en-US";
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: state.currency,
+    minimumFractionDigits: 2
+  }).format(value);
 }
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
     products: state.products,
     history: state.history,
-    cashierName: cashierNameInput.value.trim()
+    users: state.users,
+    cashierName: cashierNameInput.value.trim(),
+    currency: state.currency,
+    theme: state.theme,
+    currentUser: state.currentUser
   }));
 }
 
@@ -36,6 +64,7 @@ function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) {
     state.products = DEFAULT_PRODUCTS;
+    state.users = DEFAULT_USERS;
     return;
   }
 
@@ -43,9 +72,35 @@ function loadState() {
     const data = JSON.parse(raw);
     state.products = Array.isArray(data.products) && data.products.length ? data.products : DEFAULT_PRODUCTS;
     state.history = Array.isArray(data.history) ? data.history : [];
+    state.users = Array.isArray(data.users) && data.users.length ? data.users : DEFAULT_USERS;
+    state.currency = CURRENCY_LOCALES[data.currency] ? data.currency : "USD";
+    state.theme = data.theme === "dark" ? "dark" : "light";
+    state.currentUser = data.currentUser || null;
     cashierNameInput.value = data.cashierName || "";
   } catch {
     state.products = DEFAULT_PRODUCTS;
+    state.users = DEFAULT_USERS;
+  }
+}
+
+function setTheme(theme) {
+  state.theme = theme;
+  document.body.dataset.theme = theme;
+  darkModeBtn.textContent = theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode";
+  saveState();
+}
+
+function applySessionState() {
+  const isLoggedIn = Boolean(state.currentUser);
+  document.body.classList.toggle("authenticated", isLoggedIn);
+
+  if (state.currentUser?.role === "admin") {
+    inventoryAdmin.hidden = false;
+    clearHistoryBtn.hidden = false;
+  } else {
+    inventoryAdmin.hidden = true;
+    clearHistoryBtn.hidden = true;
+    inventoryAdmin.removeAttribute("open");
   }
 }
 
@@ -198,7 +253,7 @@ function completeSale(event) {
   const sale = {
     receiptNo: `R-${String(state.history.length + 1).padStart(5, "0")}`,
     timestamp: new Date().toISOString(),
-    cashier: cashierNameInput.value.trim(),
+    cashier: cashierNameInput.value.trim() || state.currentUser?.username || "",
     paymentMethod: document.getElementById("paymentMethod").value,
     subtotal: totals.subtotal,
     discount: totals.discount,
@@ -206,6 +261,7 @@ function completeSale(event) {
     total: totals.total,
     received: amountReceived,
     change: amountReceived - totals.total,
+    currency: state.currency,
     items: state.cart.map((x) => ({ ...x }))
   };
 
@@ -225,6 +281,8 @@ function formatReceipt(sale) {
     `Receipt ${sale.receiptNo}`,
     `${new Date(sale.timestamp).toLocaleString()}`,
     `Cashier: ${sale.cashier || "N/A"}`,
+    `Role: ${state.currentUser?.role || "unknown"}`,
+    `Currency: ${state.currency}`,
     "--------------------------------",
     ...sale.items.map((i) => `${i.name} x${i.qty}  ${money(i.qty * i.price)}`),
     "--------------------------------",
@@ -242,6 +300,11 @@ function formatReceipt(sale) {
 
 function addProduct(event) {
   event.preventDefault();
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can add products.");
+    return;
+  }
+
   const name = document.getElementById("productName").value.trim();
   const sku = document.getElementById("productSku").value.trim();
   const price = Number(document.getElementById("productPrice").value);
@@ -260,7 +323,46 @@ function addProduct(event) {
   saveState();
 }
 
+function updateProductPrice(event) {
+  event.preventDefault();
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can update price.");
+    return;
+  }
+
+  const sku = document.getElementById("priceSku").value.trim().toLowerCase();
+  const newPrice = Number(document.getElementById("newPrice").value);
+
+  if (!sku || Number.isNaN(newPrice) || newPrice < 0) {
+    alert("Enter valid SKU and price.");
+    return;
+  }
+
+  const product = state.products.find((p) => p.sku.toLowerCase() === sku);
+  if (!product) {
+    alert("Product not found for this SKU.");
+    return;
+  }
+
+  product.price = newPrice;
+  state.cart = state.cart.map((line) => (
+    line.productId === product.id ? { ...line, price: newPrice } : line
+  ));
+  event.target.reset();
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+  saveState();
+  alert(`Price updated for ${product.name} (${product.sku}).`);
+}
+
 function clearHistory() {
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can clear history.");
+    return;
+  }
+
   if (!confirm("Clear all sales history?")) return;
   state.history = [];
   renderHistory();
@@ -276,8 +378,56 @@ function resetCurrentSale() {
   renderCart();
 }
 
+function handleLogin(event) {
+  event.preventDefault();
+  const role = document.getElementById("loginRole").value;
+  const username = document.getElementById("loginUsername").value.trim();
+  const password = document.getElementById("loginPassword").value;
+
+  const user = state.users.find((entry) => (
+    entry.username.toLowerCase() === username.toLowerCase()
+    && entry.password === password
+    && entry.role === role
+  ));
+
+  if (!user) {
+    alert("Invalid credentials.");
+    return;
+  }
+
+  state.currentUser = { username: user.username, role: user.role };
+  if (!cashierNameInput.value.trim()) {
+    cashierNameInput.value = user.username;
+  }
+  applySessionState();
+  saveState();
+}
+
+function logout() {
+  if (!confirm("Logout from current session?")) return;
+  state.currentUser = null;
+  applySessionState();
+  saveState();
+}
+
+function changeCurrency() {
+  state.currency = currencySelect.value;
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+  saveState();
+}
+
+function printReceipt() {
+  window.print();
+}
+
 function init() {
   loadState();
+  currencySelect.value = state.currency;
+  setTheme(state.theme);
+  applySessionState();
   renderProducts();
   renderCart();
   renderHistory();
@@ -289,8 +439,17 @@ function init() {
   document.getElementById("amountReceived").addEventListener("input", renderCart);
   document.getElementById("checkoutForm").addEventListener("submit", completeSale);
   document.getElementById("productForm").addEventListener("submit", addProduct);
+  document.getElementById("priceForm").addEventListener("submit", updateProductPrice);
   document.getElementById("clearHistoryBtn").addEventListener("click", clearHistory);
   document.getElementById("newSaleBtn").addEventListener("click", resetCurrentSale);
+  document.getElementById("loginForm").addEventListener("submit", handleLogin);
+  document.getElementById("logoutBtn").addEventListener("click", logout);
+  document.getElementById("printReceiptBtn").addEventListener("click", printReceipt);
+  currencySelect.addEventListener("change", changeCurrency);
+  darkModeBtn.addEventListener("click", () => {
+    setTheme(state.theme === "dark" ? "light" : "dark");
+  });
+
   cashierNameInput.addEventListener("input", saveState);
 }
 
