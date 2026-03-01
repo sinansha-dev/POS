@@ -10,7 +10,31 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <main class="app-shell">
+  <div id="loginOverlay" class="overlay">
+    <form id="loginForm" class="login-card">
+      <h2>NovaPOS Login</h2>
+      <p>Sign in as admin or user to continue.</p>
+      <label class="field">
+        <span>Role</span>
+        <select id="loginRole" required>
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Username</span>
+        <input id="loginUsername" type="text" placeholder="Enter username" required />
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="loginPassword" type="password" placeholder="Enter password" required />
+      </label>
+      <button class="btn" type="submit">Login</button>
+      <small>Default credentials: admin/admin123, cashier/cash123</small>
+    </form>
+  </div>
+
+  <main class="app-shell" id="appShell">
     <header class="topbar">
       <div>
         <p class="eyebrow">Retail Command Center</p>
@@ -21,7 +45,17 @@
           <span>Cashier</span>
           <input id="cashierName" type="text" placeholder="e.g. Fatima" />
         </label>
-        <button id="newSaleBtn" class="btn ghost">New Sale</button>
+        <label class="field compact">
+          <span>Currency</span>
+          <select id="currencySelect">
+            <option value="USD">USD</option>
+            <option value="INR">INR</option>
+            <option value="SAR">SAR</option>
+          </select>
+        </label>
+        <button id="darkModeBtn" class="btn ghost" type="button">🌙 Dark Mode</button>
+        <button id="newSaleBtn" class="btn ghost" type="button">New Sale</button>
+        <button id="logoutBtn" class="btn danger" type="button">Logout</button>
       </div>
     </header>
 
@@ -40,8 +74,8 @@
         </div>
         <div id="productGrid" class="product-grid"></div>
 
-        <details class="inventory-admin">
-          <summary>Inventory Manager</summary>
+        <details class="inventory-admin" id="inventoryAdmin">
+          <summary>Inventory Manager (Admin)</summary>
           <form id="productForm" class="inventory-form">
             <input id="productName" type="text" placeholder="Name" required />
             <input id="productSku" type="text" placeholder="SKU" required />
@@ -104,7 +138,10 @@
         </form>
 
         <article class="receipt" id="receipt">
-          <h4>Receipt Preview</h4>
+          <div class="panel-header">
+            <h4>Receipt Preview</h4>
+            <button id="printReceiptBtn" class="btn" type="button">Print Receipt</button>
+          </div>
           <pre id="receiptContent">No completed sale yet.</pre>
         </article>
       </div>
@@ -113,7 +150,7 @@
     <section class="panel history-panel">
       <div class="panel-header">
         <h3>Sales History</h3>
-        <button id="clearHistoryBtn" class="btn danger">Clear History</button>
+        <button id="clearHistoryBtn" class="btn danger" type="button">Clear History</button>
       </div>
       <div class="cart-list-wrap">
         <table id="historyTable">
