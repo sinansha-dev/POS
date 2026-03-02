@@ -196,7 +196,7 @@ function renderCart() {
 
 function renderHistory() {
   historyBody.innerHTML = "";
-  [...state.history].reverse().forEach((sale) => {
+  [...state.history].forEach((sale) => {
     const row = document.createElement("tr");
     row.innerHTML = `
       <td>${sale.receiptNo}</td>
@@ -223,26 +223,58 @@ function renderKPIs() {
   document.getElementById("kpiLowStock").textContent = String(lowStock);
 }
 
-function completeSale(event) {
+async function refreshFromServer() {
+  await loadBootstrap();
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+}
+
+async function completeSale(event) {
   event.preventDefault();
-  if (!state.cart.length) {
-    alert("Cart is empty.");
-    return;
-  }
+  if (!state.cart.length) return alert("Cart is empty.");
 
   const totals = computeTotals();
   const amountReceived = Number(document.getElementById("amountReceived").value || 0);
-  if (amountReceived < totals.total) {
-    alert("Amount received is less than total.");
-    return;
-  }
+  if (amountReceived < totals.total) return alert("Amount received is less than total.");
 
-  for (const line of state.cart) {
-    const product = state.products.find((p) => p.id === line.productId);
-    if (!product || product.stock < line.qty) {
-      alert(`Insufficient stock for ${line.name}`);
-      return;
-    }
+  try {
+    const result = await api("/api/sales", {
+      method: "POST",
+      body: JSON.stringify({
+        cashier: cashierNameInput.value.trim() || state.currentUser?.username || "",
+        paymentMethod: document.getElementById("paymentMethod").value,
+        subtotal: totals.subtotal,
+        discount: totals.discount,
+        tax: totals.tax,
+        total: totals.total,
+        received: amountReceived,
+        change: amountReceived - totals.total,
+        currency: state.currency,
+        items: state.cart
+      })
+    });
+
+    const sale = {
+      receiptNo: result.receiptNo,
+      timestamp: result.timestamp,
+      cashier: cashierNameInput.value.trim() || state.currentUser?.username || "",
+      paymentMethod: document.getElementById("paymentMethod").value,
+      subtotal: totals.subtotal,
+      discount: totals.discount,
+      tax: totals.tax,
+      total: totals.total,
+      received: amountReceived,
+      change: amountReceived - totals.total,
+      items: state.cart.map((x) => ({ ...x }))
+    };
+
+    receiptContent.textContent = formatReceipt(sale);
+    state.cart = [];
+    await refreshFromServer();
+  } catch (e) {
+    alert(e.message);
   }
 
   state.cart.forEach((line) => {
@@ -294,11 +326,10 @@ function formatReceipt(sale) {
     `Change: ${money(sale.change)}`,
     "Thank you for shopping!"
   ];
-
   return lines.join("\n");
 }
 
-function addProduct(event) {
+async function addProduct(event) {
   event.preventDefault();
   if (state.currentUser?.role !== "admin") {
     alert("Only admin can add products.");
@@ -309,18 +340,44 @@ function addProduct(event) {
   const sku = document.getElementById("productSku").value.trim();
   const price = Number(document.getElementById("productPrice").value);
   const stock = Number(document.getElementById("productStock").value);
-
   if (!name || !sku || price < 0 || stock < 0) return;
-  if (state.products.some((p) => p.sku.toLowerCase() === sku.toLowerCase())) {
-    alert("SKU already exists.");
-    return;
-  }
 
-  state.products.push({ id: crypto.randomUUID(), name, sku, price, stock });
-  event.target.reset();
-  renderProducts();
-  renderKPIs();
-  saveState();
+  try {
+    await api("/api/products", { method: "POST", body: JSON.stringify({ name, sku, price, stock }) });
+    event.target.reset();
+    await refreshFromServer();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function updateProductPrice(event) {
+  event.preventDefault();
+  if (state.currentUser?.role !== "admin") return alert("Only admin can update price.");
+
+  const sku = document.getElementById("priceSku").value.trim();
+  const newPrice = Number(document.getElementById("newPrice").value);
+  if (!sku || Number.isNaN(newPrice) || newPrice < 0) return alert("Enter valid SKU and price.");
+
+  try {
+    await api(`/api/products/${encodeURIComponent(sku)}/price`, {
+      method: "PATCH",
+      body: JSON.stringify({ price: newPrice })
+    });
+
+    const product = state.products.find((p) => p.sku.toLowerCase() === sku.toLowerCase());
+    if (product) {
+      state.cart = state.cart.map((line) => (
+        line.productId === product.id ? { ...line, price: newPrice } : line
+      ));
+    }
+
+    event.target.reset();
+    await refreshFromServer();
+    alert("Price updated successfully.");
+  } catch (e) {
+    alert(e.message);
+  }
 }
 
 function updateProductPrice(event) {
@@ -360,10 +417,8 @@ function clearHistory() {
   }
 
   if (!confirm("Clear all sales history?")) return;
-  state.history = [];
-  renderHistory();
-  renderKPIs();
-  saveState();
+  await api("/api/history", { method: "DELETE" });
+  await refreshFromServer();
 }
 
 function resetCurrentSale() {
@@ -449,4 +504,6 @@ function init() {
   cashierNameInput.addEventListener("input", saveState);
 }
 
-init();
+init().catch((e) => {
+  alert(`Failed to load backend: ${e.message}`);
+});
