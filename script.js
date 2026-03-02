@@ -1,3 +1,18 @@
+const STORAGE_KEY = "novapos-state-v2";
+
+const DEFAULT_PRODUCTS = [
+  { id: crypto.randomUUID(), name: "Coffee 250g", sku: "CF-250", price: 8.5, stock: 42 },
+  { id: crypto.randomUUID(), name: "Milk 1L", sku: "MLK-1L", price: 2.2, stock: 25 },
+  { id: crypto.randomUUID(), name: "Bread Loaf", sku: "BR-LOAF", price: 1.8, stock: 14 },
+  { id: crypto.randomUUID(), name: "Chocolate Bar", sku: "CH-80", price: 1.25, stock: 8 },
+  { id: crypto.randomUUID(), name: "Orange Juice", sku: "OJ-1L", price: 3.9, stock: 12 }
+];
+
+const DEFAULT_USERS = [
+  { username: "admin", password: "admin123", role: "admin" },
+  { username: "cashier", password: "cash123", role: "user" }
+];
+
 const CURRENCY_LOCALES = {
   USD: "en-US",
   INR: "en-IN",
@@ -8,6 +23,7 @@ const state = {
   products: [],
   cart: [],
   history: [],
+  users: [],
   currentUser: null,
   currency: "USD",
   theme: "light"
@@ -23,18 +39,6 @@ const currencySelect = document.getElementById("currencySelect");
 const darkModeBtn = document.getElementById("darkModeBtn");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
-async function api(url, options = {}) {
-  const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || "Request failed.");
-  }
-  return response.json();
-}
-
 function money(value) {
   const locale = CURRENCY_LOCALES[state.currency] || "en-US";
   return new Intl.NumberFormat(locale, {
@@ -44,24 +48,46 @@ function money(value) {
   }).format(value);
 }
 
-async function loadBootstrap() {
-  const data = await api("/api/bootstrap");
-  state.products = data.products || [];
-  state.history = data.history || [];
-  state.currency = CURRENCY_LOCALES[data.settings?.currency] ? data.settings.currency : "USD";
-  state.theme = data.settings?.theme === "dark" ? "dark" : "light";
-  cashierNameInput.value = data.settings?.cashierName || "";
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    products: state.products,
+    history: state.history,
+    users: state.users,
+    cashierName: cashierNameInput.value.trim(),
+    currency: state.currency,
+    theme: state.theme,
+    currentUser: state.currentUser
+  }));
 }
 
-async function persistSettings(partial) {
-  await api("/api/settings", { method: "PUT", body: JSON.stringify(partial) });
+function loadState() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) {
+    state.products = DEFAULT_PRODUCTS;
+    state.users = DEFAULT_USERS;
+    return;
+  }
+
+  try {
+    const data = JSON.parse(raw);
+    state.products = Array.isArray(data.products) && data.products.length ? data.products : DEFAULT_PRODUCTS;
+    state.history = Array.isArray(data.history) ? data.history : [];
+    state.users = Array.isArray(data.users) && data.users.length ? data.users : DEFAULT_USERS;
+    state.currency = CURRENCY_LOCALES[data.currency] ? data.currency : "USD";
+    state.theme = data.theme === "dark" ? "dark" : "light";
+    state.currentUser = data.currentUser || null;
+    cashierNameInput.value = data.cashierName || "";
+  } catch {
+    state.products = DEFAULT_PRODUCTS;
+    state.users = DEFAULT_USERS;
+  }
 }
 
 function setTheme(theme) {
   state.theme = theme;
   document.body.dataset.theme = theme;
   darkModeBtn.textContent = theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode";
-  persistSettings({ theme }).catch((e) => alert(e.message));
+  saveState();
 }
 
 function applySessionState() {
@@ -250,6 +276,36 @@ async function completeSale(event) {
   } catch (e) {
     alert(e.message);
   }
+
+  state.cart.forEach((line) => {
+    const product = state.products.find((p) => p.id === line.productId);
+    product.stock -= line.qty;
+  });
+
+  const sale = {
+    receiptNo: `R-${String(state.history.length + 1).padStart(5, "0")}`,
+    timestamp: new Date().toISOString(),
+    cashier: cashierNameInput.value.trim() || state.currentUser?.username || "",
+    paymentMethod: document.getElementById("paymentMethod").value,
+    subtotal: totals.subtotal,
+    discount: totals.discount,
+    tax: totals.tax,
+    total: totals.total,
+    received: amountReceived,
+    change: amountReceived - totals.total,
+    currency: state.currency,
+    items: state.cart.map((x) => ({ ...x }))
+  };
+
+  state.history.push(sale);
+  receiptContent.textContent = formatReceipt(sale);
+
+  state.cart = [];
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+  saveState();
 }
 
 function formatReceipt(sale) {
@@ -275,7 +331,10 @@ function formatReceipt(sale) {
 
 async function addProduct(event) {
   event.preventDefault();
-  if (state.currentUser?.role !== "admin") return alert("Only admin can add products.");
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can add products.");
+    return;
+  }
 
   const name = document.getElementById("productName").value.trim();
   const sku = document.getElementById("productSku").value.trim();
@@ -321,8 +380,42 @@ async function updateProductPrice(event) {
   }
 }
 
-async function clearHistory() {
-  if (state.currentUser?.role !== "admin") return alert("Only admin can clear history.");
+function updateProductPrice(event) {
+  event.preventDefault();
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can update price.");
+    return;
+  }
+
+  const sku = document.getElementById("priceSku").value.trim().toLowerCase();
+  const newPrice = Number(document.getElementById("newPrice").value);
+
+  if (!sku || Number.isNaN(newPrice) || newPrice < 0) {
+    alert("Enter valid SKU and price.");
+    return;
+  }
+
+  const product = state.products.find((p) => p.sku.toLowerCase() === sku);
+  if (!product) {
+    alert("Product not found for this SKU.");
+    return;
+  }
+
+  product.price = newPrice;
+  event.target.reset();
+  renderProducts();
+  renderCart();
+  renderHistory();
+  renderKPIs();
+  saveState();
+}
+
+function clearHistory() {
+  if (state.currentUser?.role !== "admin") {
+    alert("Only admin can clear history.");
+    return;
+  }
+
   if (!confirm("Clear all sales history?")) return;
   await api("/api/history", { method: "DELETE" });
   await refreshFromServer();
@@ -336,51 +429,53 @@ function resetCurrentSale() {
   renderCart();
 }
 
-async function handleLogin(event) {
+function handleLogin(event) {
   event.preventDefault();
   const role = document.getElementById("loginRole").value;
   const username = document.getElementById("loginUsername").value.trim();
   const password = document.getElementById("loginPassword").value;
 
-  try {
-    const result = await api("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password, role })
-    });
+  const user = state.users.find((entry) => (
+    entry.username.toLowerCase() === username.toLowerCase()
+    && entry.password === password
+    && entry.role === role
+  ));
 
-    state.currentUser = result.user;
-    if (!cashierNameInput.value.trim()) cashierNameInput.value = result.user.username;
-    applySessionState();
-  } catch (e) {
-    alert(e.message);
+  if (!user) {
+    alert("Invalid credentials.");
+    return;
   }
+
+  state.currentUser = { username: user.username, role: user.role };
+  if (!cashierNameInput.value.trim()) {
+    cashierNameInput.value = user.username;
+  }
+  applySessionState();
+  saveState();
 }
 
 function logout() {
   if (!confirm("Logout from current session?")) return;
   state.currentUser = null;
   applySessionState();
+  saveState();
 }
 
 function changeCurrency() {
   state.currency = currencySelect.value;
-  persistSettings({ currency: state.currency }).catch((e) => alert(e.message));
   renderProducts();
   renderCart();
   renderHistory();
   renderKPIs();
+  saveState();
 }
 
 function printReceipt() {
   window.print();
 }
 
-function persistCashierName() {
-  persistSettings({ cashierName: cashierNameInput.value.trim() }).catch((e) => alert(e.message));
-}
-
-async function init() {
-  await loadBootstrap();
+function init() {
+  loadState();
   currencySelect.value = state.currency;
   setTheme(state.theme);
   applySessionState();
@@ -402,8 +497,11 @@ async function init() {
   document.getElementById("logoutBtn").addEventListener("click", logout);
   document.getElementById("printReceiptBtn").addEventListener("click", printReceipt);
   currencySelect.addEventListener("change", changeCurrency);
-  darkModeBtn.addEventListener("click", () => setTheme(state.theme === "dark" ? "light" : "dark"));
-  cashierNameInput.addEventListener("input", persistCashierName);
+  darkModeBtn.addEventListener("click", () => {
+    setTheme(state.theme === "dark" ? "light" : "dark");
+  });
+
+  cashierNameInput.addEventListener("input", saveState);
 }
 
 init().catch((e) => {
