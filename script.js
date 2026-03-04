@@ -258,6 +258,7 @@ function buildReceipt(sale, totals) {
 
 async function completeSale(event) {
   event.preventDefault();
+  const submitButton = event.submitter || event.target.querySelector("button[type='submit']");
 
   if (!state.currentUser) {
     alert("Please login first.");
@@ -275,28 +276,36 @@ async function completeSale(event) {
     return;
   }
 
-  const sale = await api("/api/sales", {
-    method: "POST",
-    body: JSON.stringify({
-      cashier: state.cashierName || state.currentUser.username,
-      paymentMethod: document.getElementById("paymentMethod").value,
-      subtotal: totals.subtotal,
-      discount: totals.discountAmount,
-      tax: totals.taxAmount,
-      total: totals.total,
-      received: totals.received,
-      change: totals.change,
-      currency: state.currency,
-      items: state.cart
-    })
-  });
+  if (submitButton) submitButton.disabled = true;
 
-  receiptContent.textContent = buildReceipt(sale, totals);
+  try {
+    const sale = await api("/api/sales", {
+      method: "POST",
+      body: JSON.stringify({
+        cashier: state.cashierName || state.currentUser.username,
+        paymentMethod: document.getElementById("paymentMethod").value,
+        subtotal: totals.subtotal,
+        discount: totals.discountAmount,
+        tax: totals.taxAmount,
+        total: totals.total,
+        received: totals.received,
+        change: totals.change,
+        currency: state.currency,
+        items: state.cart
+      })
+    });
 
-  state.cart = [];
-  document.getElementById("amountReceived").value = "0";
+    receiptContent.textContent = buildReceipt(sale, totals);
 
-  await loadBootstrap();
+    state.cart = [];
+    document.getElementById("amountReceived").value = "0";
+
+    await loadBootstrap();
+  } catch (error) {
+    alert(error.message || "Checkout failed. Please try again.");
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
 }
 
 async function addProduct(event) {
