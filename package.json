@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "name": "pos-main",
   "version": "1.0.0",
   "description": "",
@@ -11,4 +12,14 @@
   "author": "",
   "license": "ISC",
   "type": "module"
+=======
+  "name": "novapos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+>>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
 }
