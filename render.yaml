@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: pos-backend
-    env: node
-    plan: free
-    buildCommand: ""
-    startCommand: node server.js

@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 const STORAGE_KEY = "novapos-state-v2";
 
 const DEFAULT_PRODUCTS = [
@@ -21,15 +19,11 @@ const CURRENCY_LOCALES = {
   SAR: "en-SA"
 };
 
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
 const state = {
   products: [],
   cart: [],
   history: [],
-<<<<<<< HEAD
-=======
   users: [],
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
   currentUser: null,
   currency: "USD",
   theme: "light"
@@ -42,70 +36,6 @@ const receiptContent = document.getElementById("receiptContent");
 const cashierNameInput = document.getElementById("cashierName");
 const inventoryAdmin = document.getElementById("inventoryAdmin");
 const currencySelect = document.getElementById("currencySelect");
-<<<<<<< HEAD
-
-async function api(url, options = {}) {
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options
-  });
-
-  const data = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    throw new Error(data.error || "API error");
-  }
-
-  return data;
-}
-
-function applySessionState() {
-  const logged = Boolean(state.currentUser);
-  document.body.classList.toggle("authenticated", logged);
-
-  if (state.currentUser?.role === "admin") {
-    inventoryAdmin.hidden = false;
-  } else {
-    inventoryAdmin.hidden = true;
-  }
-}
-
-function money(value) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: state.currency
-  }).format(value);
-}
-
-async function loadBootstrap() {
-  const data = await api("/api/bootstrap");
-
-  state.products = data.products || [];
-  state.history = data.history || [];
-  state.currency = data.settings?.currency || "USD";
-
-  renderProducts();
-  renderHistory();
-}
-
-function renderProducts() {
-  productGrid.innerHTML = "";
-
-  state.products.forEach((p) => {
-    const card = document.createElement("div");
-    card.className = "product-card";
-
-    card.innerHTML = `
-      <strong>${p.name}</strong>
-      <small>SKU: ${p.sku}</small>
-      <small>${money(p.price)}</small>
-      <small>Stock: ${p.stock}</small>
-      <button class="btn">Add</button>
-    `;
-
-    card.querySelector("button").onclick = () => addToCart(p.id);
-
-=======
 const darkModeBtn = document.getElementById("darkModeBtn");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
@@ -203,28 +133,10 @@ function renderProducts() {
       <button class="btn" ${product.stock <= 0 ? "disabled" : ""}>Add to Cart</button>
     `;
     card.querySelector("button").addEventListener("click", () => addToCart(product.id));
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
     productGrid.appendChild(card);
   });
 }
 
-<<<<<<< HEAD
-function addToCart(id) {
-  const product = state.products.find(p => p.id === id);
-  if (!product) return;
-
-  const existing = state.cart.find(i => i.productId === id);
-
-  if (existing) {
-    existing.qty++;
-  } else {
-    state.cart.push({
-      productId: id,
-      name: product.name,
-      price: product.price,
-      qty: 1
-    });
-=======
 function addToCart(productId) {
   const product = state.products.find((p) => p.id === productId);
   if (!product || product.stock <= 0) return;
@@ -235,29 +147,11 @@ function addToCart(productId) {
     line.qty += 1;
   } else {
     state.cart.push({ productId, name: product.name, price: product.price, qty: 1 });
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
   }
 
   renderCart();
 }
 
-<<<<<<< HEAD
-function renderCart() {
-  cartBody.innerHTML = "";
-
-  state.cart.forEach((item) => {
-    const row = document.createElement("tr");
-
-    row.innerHTML = `
-      <td>${item.name}</td>
-      <td>${item.qty}</td>
-      <td>${money(item.price)}</td>
-      <td>${money(item.price * item.qty)}</td>
-    `;
-
-    cartBody.appendChild(row);
-  });
-=======
 function updateCartQty(productId, qty) {
   const product = state.products.find((p) => p.id === productId);
   const line = state.cart.find((item) => item.productId === productId);
@@ -298,25 +192,10 @@ function renderCart() {
   document.getElementById("taxValue").textContent = money(totals.tax);
   document.getElementById("grandTotal").textContent = money(totals.total);
   document.getElementById("changeDue").textContent = money(change > 0 ? change : 0);
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
 }
 
 function renderHistory() {
   historyBody.innerHTML = "";
-<<<<<<< HEAD
-
-  state.history.forEach((sale) => {
-    const row = document.createElement("tr");
-
-    row.innerHTML = `
-      <td>${sale.receiptNo}</td>
-      <td>${new Date(sale.timestamp).toLocaleString()}</td>
-      <td>${sale.cashier}</td>
-      <td>${sale.paymentMethod}</td>
-      <td>${money(sale.total)}</td>
-    `;
-
-=======
   [...state.history].forEach((sale) => {
     const row = document.createElement("tr");
     row.innerHTML = `
@@ -327,40 +206,10 @@ function renderHistory() {
       <td>${sale.paymentMethod}</td>
       <td>${money(sale.total)}</td>
     `;
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
     historyBody.appendChild(row);
   });
 }
 
-<<<<<<< HEAD
-async function handleLogin(event) {
-  event.preventDefault();
-
-  const username = document.getElementById("loginUsername").value;
-  const password = document.getElementById("loginPassword").value;
-  const role = document.getElementById("loginRole").value;
-
-  try {
-    const data = await api("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password, role })
-    });
-
-    state.currentUser = data.user;
-
-    cashierNameInput.value = data.user.username;
-
-    applySessionState();
-
-  } catch (err) {
-    alert("Login failed");
-  }
-}
-
-function logout() {
-  state.currentUser = null;
-  applySessionState();
-=======
 function renderKPIs() {
   const today = new Date().toDateString();
   const todaySales = state.history.filter((sale) => new Date(sale.timestamp).toDateString() === today);
@@ -380,44 +229,10 @@ async function refreshFromServer() {
   renderCart();
   renderHistory();
   renderKPIs();
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
 }
 
 async function completeSale(event) {
   event.preventDefault();
-<<<<<<< HEAD
-
-  if (!state.cart.length) {
-    alert("Cart empty");
-    return;
-  }
-
-  const subtotal = state.cart.reduce((s, i) => s + i.price * i.qty, 0);
-
-  const sale = await api("/api/sales", {
-    method: "POST",
-    body: JSON.stringify({
-      cashier: state.currentUser.username,
-      paymentMethod: "cash",
-      subtotal,
-      discount: 0,
-      tax: 0,
-      total: subtotal,
-      received: subtotal,
-      change: 0,
-      currency: state.currency,
-      items: state.cart
-    })
-  });
-
-  receiptContent.textContent = `Receipt ${sale.receiptNo}`;
-
-  state.cart = [];
-
-  await loadBootstrap();
-
-  renderCart();
-=======
   if (!state.cart.length) return alert("Cart is empty.");
 
   const totals = computeTotals();
@@ -512,41 +327,10 @@ function formatReceipt(sale) {
     "Thank you for shopping!"
   ];
   return lines.join("\n");
->>>>>>> f638f4f6a962fdf3dd3c46b17ee23ad4f5ed716a
 }
 
 async function addProduct(event) {
   event.preventDefault();
-<<<<<<< HEAD
-
-  const name = document.getElementById("productName").value;
-  const sku = document.getElementById("productSku").value;
-  const price = Number(document.getElementById("productPrice").value);
-  const stock = Number(document.getElementById("productStock").value);
-
-  await api("/api/products", {
-    method: "POST",
-    body: JSON.stringify({ name, sku, price, stock })
-  });
-
-  await loadBootstrap();
-}
-
-function init() {
-
-  document.getElementById("loginForm").addEventListener("submit", handleLogin);
-
-  document.getElementById("logoutBtn").addEventListener("click", logout);
-
-  document.getElementById("checkoutForm").addEventListener("submit", completeSale);
-
-  document.getElementById("productForm").addEventListener("submit", addProduct);
-
-  loadBootstrap();
-}
-
-init();
-=======
   if (state.currentUser?.role !== "admin") {
     alert("Only admin can add products.");
     return;
@@ -562,35 +346,6 @@ init();
     await api("/api/products", { method: "POST", body: JSON.stringify({ name, sku, price, stock }) });
     event.target.reset();
     await refreshFromServer();
-  } catch (e) {
-    alert(e.message);
-  }
-}
-
-async function updateProductPrice(event) {
-  event.preventDefault();
-  if (state.currentUser?.role !== "admin") return alert("Only admin can update price.");
-
-  const sku = document.getElementById("priceSku").value.trim();
-  const newPrice = Number(document.getElementById("newPrice").value);
-  if (!sku || Number.isNaN(newPrice) || newPrice < 0) return alert("Enter valid SKU and price.");
-
-  try {
-    await api(`/api/products/${encodeURIComponent(sku)}/price`, {
-      method: "PATCH",
-      body: JSON.stringify({ price: newPrice })
-    });
-
-    const product = state.products.find((p) => p.sku.toLowerCase() === sku.toLowerCase());
-    if (product) {
-      state.cart = state.cart.map((line) => (
-        line.productId === product.id ? { ...line, price: newPrice } : line
-      ));
-    }
-
-    event.target.reset();
-    await refreshFromServer();
-    alert("Price updated successfully.");
   } catch (e) {
     alert(e.message);
   }
