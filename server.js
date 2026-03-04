@@ -203,3 +203,8 @@ createServer(async (req, res) => {
 }).listen(PORT, () => {
   console.log(`NovaPOS backend running on http://localhost:${PORT}`);
 });
+const PORT = process.env.PORT || 4173;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
