@@ -71,7 +71,7 @@ function renderProducts() {
       <small>SKU: ${p.sku}</small>
       <small>${money(p.price)}</small>
       <small>Stock: ${p.stock}</small>
-      <button>Add</button>
+     <button class="btn">Add</button>
     `;
 
     card.querySelector("button").onclick = () => addToCart(p.id);
