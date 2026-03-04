@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname, join, normalize } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import crypto from "node:crypto";
 
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = process.cwd();
@@ -134,7 +135,6 @@ async function handleApi(req, res, pathname) {
     const sale = await parseBody(req);
     if (!Array.isArray(sale.items) || !sale.items.length) return json(res, 400, { error: "Cart is empty." });
 
-    const tx = db.createSession ? null : null; // no-op to keep compatibility
     try {
       db.exec("BEGIN");
       for (const line of sale.items) {
@@ -178,8 +178,10 @@ async function handleApi(req, res, pathname) {
 }
 
 async function serveStatic(res, pathname) {
-  const requested = pathname === "/" ? "/index.html" : pathname;
-  const filePath = join(ROOT, requested);
+  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const safePath = normalize(requested).replace(/^\.{2,}(\/|\\|$)/, "");
+  const filePath = join(ROOT, safePath);
+
   try {
     const content = await readFile(filePath);
     res.writeHead(200, { "Content-Type": MIME[extname(filePath)] || "text/plain; charset=utf-8" });
