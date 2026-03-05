@@ -550,8 +550,49 @@ async function initSqlite() {
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
 }
 
+
+// ── SUPABASE SEED ─────────────────────────────────────────────
+// Auto-seeds users, products, settings if Supabase tables are empty
+async function initSupabase() {
+  if (!SUPABASE_URL) return;
+  try {
+    // Seed users
+    const users = await sbQuery("users", "GET", null, "?select=id&limit=1");
+    if (!users || users.length === 0) {
+      console.log("🌱 Seeding default users into Supabase...");
+      await sbQuery("users", "POST", { username: "admin",   password: hashPassword("admin123"), role: "admin" });
+      await sbQuery("users", "POST", { username: "cashier", password: hashPassword("cash123"),  role: "user"  });
+      console.log("⚠️  Default users created. Change passwords after first login!");
+    }
+    // Seed products
+    const products = await sbQuery("products", "GET", null, "?select=id&limit=1");
+    if (!products || products.length === 0) {
+      console.log("🌱 Seeding default products into Supabase...");
+      const items = [
+        { id: crypto.randomUUID(), name: "Coffee 250g",   sku: "CF-250",  price: 8.5,  stock: 42 },
+        { id: crypto.randomUUID(), name: "Milk 1L",       sku: "MLK-1L",  price: 2.2,  stock: 25 },
+        { id: crypto.randomUUID(), name: "Bread Loaf",    sku: "BR-LOAF", price: 1.8,  stock: 14 },
+        { id: crypto.randomUUID(), name: "Chocolate Bar", sku: "CH-80",   price: 1.25, stock: 8  },
+        { id: crypto.randomUUID(), name: "Orange Juice",  sku: "OJ-1L",   price: 3.9,  stock: 12 },
+      ];
+      for (const p of items) await sbQuery("products", "POST", p);
+    }
+    // Seed settings
+    const settings = await sbQuery("settings", "GET", null, "?select=key&limit=1");
+    if (!settings || settings.length === 0) {
+      await sbQuery("settings", "POST", { key: "currency",    value: "USD"   });
+      await sbQuery("settings", "POST", { key: "theme",       value: "light" });
+      await sbQuery("settings", "POST", { key: "cashierName", value: ""      });
+    }
+    console.log("✅ Supabase ready!");
+  } catch (err) {
+    console.error("❌ Supabase seed error:", err.message);
+  }
+}
+
 // ── START ─────────────────────────────────────────────────────
 await initSqlite().catch((err) => console.warn("SQLite init skipped:", err.message));
+await initSupabase();
 
 createServer(async (req, res) => {
   const origin = process.env.ALLOWED_ORIGIN || "*";
