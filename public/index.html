@@ -13,7 +13,7 @@
   <div id="loginOverlay" class="overlay">
     <form id="loginForm" class="login-card">
       <h2>NovaPOS Login</h2>
-      <p>Sign in as admin or user to continue.</p>
+      <p>Sign in to continue.</p>
       <label class="field">
         <span>Role</span>
         <select id="loginRole" required>
@@ -23,14 +23,14 @@
       </label>
       <label class="field">
         <span>Username</span>
-        <input id="loginUsername" type="text" placeholder="Enter username" required />
+        <input id="loginUsername" type="text" placeholder="Enter username" required autocomplete="username" />
       </label>
       <label class="field">
         <span>Password</span>
-        <input id="loginPassword" type="password" placeholder="Enter password" required />
+        <input id="loginPassword" type="password" placeholder="Enter password" required autocomplete="current-password" />
       </label>
       <button class="btn" type="submit">Login</button>
-      <small>Default credentials: admin/admin123, cashier/cash123</small>
+      <!-- Removed default credentials hint for security -->
     </form>
   </div>
 
@@ -43,7 +43,7 @@
       <div class="topbar-actions">
         <label class="field compact">
           <span>Cashier</span>
-          <input id="cashierName" type="text" placeholder="e.g. Fatima" />
+          <input id="cashierName" type="text" placeholder="Login to set" disabled style="opacity:0.7;cursor:not-allowed;" />
         </label>
         <label class="field compact">
           <span>Currency</span>
@@ -54,8 +54,8 @@
           </select>
         </label>
         <button id="darkModeBtn" class="btn ghost" type="button">🌙 Dark Mode</button>
-        <button id="newSaleBtn" class="btn ghost" type="button">New Sale</button>
-        <button id="logoutBtn" class="btn danger" type="button">Logout</button>
+        <button id="newSaleBtn"  class="btn ghost" type="button">New Sale</button>
+        <button id="logoutBtn"   class="btn danger" type="button">Logout</button>
       </div>
     </header>
 
@@ -77,16 +77,15 @@
         <details class="inventory-admin" id="inventoryAdmin">
           <summary>Inventory Manager (Admin)</summary>
           <form id="productForm" class="inventory-form">
-            <input id="productName" type="text" placeholder="Name" required />
-            <input id="productSku" type="text" placeholder="SKU" required />
-            <input id="productPrice" type="number" min="0" step="0.01" placeholder="Price" required />
-            <input id="productStock" type="number" min="0" step="1" placeholder="Stock" required />
+            <input id="productName"  type="text"   placeholder="Name"   required />
+            <input id="productSku"   type="text"   placeholder="SKU"    required />
+            <input id="productPrice" type="number" min="0" step="0.01" placeholder="Price"  required />
+            <input id="productStock" type="number" min="0" step="1"    placeholder="Stock"  required />
             <button class="btn" type="submit">Add Product</button>
           </form>
-
           <form id="priceForm" class="inventory-form compact-form">
-            <input id="priceSku" type="text" placeholder="SKU to update" required />
-            <input id="newPrice" type="number" min="0" step="0.01" placeholder="New price" required />
+            <input id="priceSku"  type="text"   placeholder="SKU to update" required />
+            <input id="newPrice"  type="number" min="0" step="0.01" placeholder="New price" required />
             <button class="btn" type="submit">Update Price</button>
           </form>
         </details>
@@ -98,11 +97,7 @@
           <table id="cartTable">
             <thead>
               <tr>
-                <th>Item</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Total</th>
-                <th></th>
+                <th>Item</th><th>Qty</th><th>Price</th><th>Total</th><th></th>
               </tr>
             </thead>
             <tbody id="cartBody"></tbody>
@@ -162,12 +157,8 @@
         <table id="historyTable">
           <thead>
             <tr>
-              <th>Receipt #</th>
-              <th>Time</th>
-              <th>Cashier</th>
-              <th>Items</th>
-              <th>Payment</th>
-              <th>Total</th>
+              <th>Receipt #</th><th>Time</th><th>Cashier</th>
+              <th>Items</th><th>Payment</th><th>Total</th>
             </tr>
           </thead>
           <tbody id="historyBody"></tbody>

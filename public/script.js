@@ -121,9 +121,10 @@ async function loadBootstrap() {
   state.history     = data.history  || [];
   state.currency    = data.settings?.currency    || "USD";
   state.theme       = data.settings?.theme       || "light";
-  state.cashierName = data.settings?.cashierName || "";
+  state.cashierName = state.currentUser?.username || "";
   currencySelect.value   = state.currency;
-  cashierNameInput.value = state.cashierName;
+  cashierNameInput.value = state.currentUser?.username || state.cashierName || "";
+  cashierNameInput.disabled = Boolean(state.currentUser);
   applyTheme();
   renderProducts();
   renderHistory();
@@ -223,7 +224,9 @@ async function handleLogin(event) {
     });
     saveToken(data.token, data.user);
     state.currentUser = data.user;
-    if (!cashierNameInput.value) cashierNameInput.value = data.user.username;
+    // cashier name is always the logged in user
+    cashierNameInput.value = data.user.username;
+    cashierNameInput.disabled = true;
     applySessionState();
     await loadBootstrap();
   } catch (err) {
@@ -341,10 +344,7 @@ function init() {
     renderProducts(); renderCart(); renderHistory(); renderKpis();
   });
 
-  cashierNameInput.addEventListener("change", async e => {
-    state.cashierName = e.target.value.trim();
-    await persistSettings({ cashierName: state.cashierName });
-  });
+  // cashierName is locked to logged in user - no change listener needed
 
   darkModeBtn.addEventListener("click", async () => {
     state.theme = state.theme === "dark" ? "light" : "dark";
