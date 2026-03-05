@@ -1,207 +1,579 @@
+// ============================================================
+//  NovaPOS  –  Secure Backend with Supabase
+// ============================================================
+//  ENV VARS to set in Render → Environment:
+//
+//  SUPABASE_URL     = https://xxxx.supabase.co
+//  SUPABASE_KEY     = your service_role key (Settings → API)
+//  JWT_SECRET       = any long random string
+//  ALLOWED_ORIGIN   = https://pos-4nqm.onrender.com
+//  PORT             = 4173 (Render sets this automatically)
+// ============================================================
+
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 
-const PORT = Number(process.env.PORT || 4173);
-const ROOT = process.cwd();
-const db = new DatabaseSync(join(ROOT, "novapos.db"));
+const PORT         = Number(process.env.PORT || 4173);
+const ROOT         = process.cwd();
+const JWT_SECRET   = process.env.JWT_SECRET || "CHANGE_THIS_SECRET";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
+if (JWT_SECRET === "CHANGE_THIS_SECRET") {
+  console.warn("⚠️  WARNING: Set JWT_SECRET in your environment variables!");
+}
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.warn("⚠️  WARNING: SUPABASE_URL or SUPABASE_KEY not set. Using local SQLite fallback.");
+}
+
+// ── MIME TYPES ───────────────────────────────────────────────
 const MIME = {
   ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
+  ".js":   "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
+  ".png":  "image/png",
+  ".jpg":  "image/jpeg",
   ".jpeg": "image/jpeg",
-  ".svg": "image/svg+xml"
+  ".svg":  "image/svg+xml"
 };
 
+// ── BLOCKED FILES ────────────────────────────────────────────
+const BLOCKED_FILES = [
+  "server.js", "novapos.db", ".env",
+  "package.json", "package-lock.json", ".git"
+];
+
+// ── RATE LIMITER ─────────────────────────────────────────────
+const rateLimitMap = new Map();
+const RATE_LIMIT_MAX    = 10;
+const RATE_LIMIT_WINDOW = 60_000;
+
+function isRateLimited(ip) {
+  const now   = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    return false;
+  }
+  if (entry.count >= RATE_LIMIT_MAX) return true;
+  entry.count++;
+  return false;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of rateLimitMap) if (now > e.resetAt) rateLimitMap.delete(ip);
+}, 300_000);
+
+// ── PASSWORD HASHING ─────────────────────────────────────────
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.createHmac("sha256", salt).update(password).digest("hex");
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  const [salt] = stored.split(":");
+  return hashPassword(password, salt) === stored;
+}
+
+// ── JWT ──────────────────────────────────────────────────────
+function b64url(str) {
+  return Buffer.from(str).toString("base64")
+    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+function createToken(payload) {
+  const h   = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const b   = b64url(JSON.stringify({ ...payload, iat: Date.now(), exp: Date.now() + 8 * 3600_000 }));
+  const sig = crypto.createHmac("sha256", JWT_SECRET).update(`${h}.${b}`).digest("base64")
+    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return `${h}.${b}.${sig}`;
+}
+function verifyToken(token) {
+  try {
+    const [h, b, sig] = token.split(".");
+    const expected = crypto.createHmac("sha256", JWT_SECRET).update(`${h}.${b}`).digest("base64")
+      .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+    if (sig !== expected) return null;
+    const payload = JSON.parse(Buffer.from(b, "base64").toString());
+    if (payload.exp < Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
+function requireAuth(req) {
+  const h = req.headers["authorization"];
+  if (!h?.startsWith("Bearer ")) return null;
+  return verifyToken(h.split(" ")[1]);
+}
+function requireAdmin(req) {
+  const u = requireAuth(req);
+  return u?.role === "admin" ? u : null;
+}
+
+// ── HELPERS ──────────────────────────────────────────────────
 function json(res, code, payload) {
-  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(code, {
+    "Content-Type":              "application/json; charset=utf-8",
+    "X-Content-Type-Options":   "nosniff",
+    "X-Frame-Options":           "DENY",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  });
   res.end(JSON.stringify(payload));
 }
-
 async function parseBody(req) {
   let data = "";
-  for await (const chunk of req) data += chunk;
+  for await (const chunk of req) {
+    data += chunk;
+    if (data.length > 100_000) throw new Error("Request too large.");
+  }
   return data ? JSON.parse(data) : {};
 }
-
-function initDb() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER);
-    CREATE TABLE IF NOT EXISTS sales (
-      id INTEGER PRIMARY KEY,
-      receipt_no TEXT UNIQUE,
-      timestamp TEXT,
-      cashier TEXT,
-      payment_method TEXT,
-      subtotal REAL,
-      discount REAL,
-      tax REAL,
-      total REAL,
-      received REAL,
-      change_amount REAL,
-      currency TEXT
-    );
-    CREATE TABLE IF NOT EXISTS sale_items (
-      id INTEGER PRIMARY KEY,
-      sale_id INTEGER,
-      product_id TEXT,
-      name TEXT,
-      price REAL,
-      qty INTEGER
-    );
-    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-  `);
-
-  db.prepare("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)").run("admin", "admin123", "admin");
-  db.prepare("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)").run("cashier", "cash123", "user");
-
-  const count = db.prepare("SELECT COUNT(*) c FROM products").get().c;
-  if (!count) {
-    const ins = db.prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)");
-    [
-      [crypto.randomUUID(), "Coffee 250g", "CF-250", 8.5, 42],
-      [crypto.randomUUID(), "Milk 1L", "MLK-1L", 2.2, 25],
-      [crypto.randomUUID(), "Bread Loaf", "BR-LOAF", 1.8, 14],
-      [crypto.randomUUID(), "Chocolate Bar", "CH-80", 1.25, 8],
-      [crypto.randomUUID(), "Orange Juice", "OJ-1L", 3.9, 12]
-    ].forEach((row) => ins.run(...row));
-  }
-
-  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
-  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'light')").run();
-  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
+function getIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress || "unknown";
 }
 
-function bootstrapPayload() {
-  const products = db.prepare("SELECT id, name, sku, price, stock FROM products ORDER BY name").all();
-  const sales = db.prepare("SELECT * FROM sales ORDER BY id DESC").all();
-  const itemStmt = db.prepare("SELECT product_id as productId, name, price, qty FROM sale_items WHERE sale_id=?");
-  const history = sales.map((s) => ({
-    receiptNo: s.receipt_no,
-    timestamp: s.timestamp,
-    cashier: s.cashier,
-    paymentMethod: s.payment_method,
-    subtotal: s.subtotal,
-    discount: s.discount,
-    tax: s.tax,
-    total: s.total,
-    received: s.received,
-    change: s.change_amount,
-    currency: s.currency,
-    items: itemStmt.all(s.id)
+// ── SUPABASE CLIENT ──────────────────────────────────────────
+// Thin fetch-based client — no npm package needed!
+async function sbQuery(table, method = "GET", body = null, filters = "") {
+  const url = `${SUPABASE_URL}/rest/v1/${table}${filters}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "apikey":        SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type":  "application/json",
+      "Prefer":        method === "POST" ? "return=representation" : "return=minimal",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Supabase error: ${err}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// Supabase RPC for raw SQL (used for seeding)
+async function sbRpc(fn, params = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: {
+      "apikey":        SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type":  "application/json",
+    },
+    body: JSON.stringify(params),
+  });
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// ── SQLITE FALLBACK (when no Supabase) ──────────────────────
+let db = null;
+function getDb() {
+  return db; // db is initialized by initSqlite() at startup
+}
+
+// ── DB ABSTRACTION ───────────────────────────────────────────
+// Unified interface — uses Supabase if env vars set, else SQLite
+const DB = {
+  async getUser(username, role) {
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("users", "GET", null,
+        `?select=username,password,role&username=ilike.${encodeURIComponent(username)}&role=eq.${role}&limit=1`);
+      return rows?.[0] || null;
+    }
+    return getDb().prepare("SELECT username, password, role FROM users WHERE lower(username)=lower(?) AND role=?").get(username, role);
+  },
+
+  async updatePassword(username, hashedPassword) {
+    if (SUPABASE_URL) {
+      await sbQuery("users", "PATCH", { password: hashedPassword }, `?username=eq.${username}`);
+    } else {
+      getDb().prepare("UPDATE users SET password=? WHERE username=?").run(hashedPassword, username);
+    }
+  },
+
+  async getProducts() {
+    if (SUPABASE_URL) {
+      return await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock&order=name");
+    }
+    return getDb().prepare("SELECT id, name, sku, price, stock FROM products ORDER BY name").all();
+  },
+
+  async addProduct(id, name, sku, price, stock) {
+    if (SUPABASE_URL) {
+      await sbQuery("products", "POST", { id, name, sku, price, stock });
+    } else {
+      getDb().prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)").run(id, name, sku, price, stock);
+    }
+  },
+
+  async updatePrice(sku, price) {
+    if (SUPABASE_URL) {
+      const result = await sbQuery("products", "PATCH", { price }, `?sku=ilike.${encodeURIComponent(sku)}`);
+      return result?.length > 0 || true;
+    }
+    const r = getDb().prepare("UPDATE products SET price=? WHERE lower(sku)=lower(?)").run(price, sku);
+    return r.changes > 0;
+  },
+
+  async getProductById(id) {
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&limit=1`);
+      return rows?.[0] || null;
+    }
+    return getDb().prepare("SELECT id, stock FROM products WHERE id=?").get(id);
+  },
+
+  async decrementStock(id, qty) {
+    if (SUPABASE_URL) {
+      // Use RPC for atomic decrement
+      await sbRpc("decrement_stock", { p_id: id, p_qty: qty });
+    } else {
+      getDb().prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(qty, id);
+    }
+  },
+
+  async getSalesCount() {
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("sales", "GET", null, "?select=id&limit=1&order=id.desc");
+      // Get count via head request
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/sales?select=id`, {
+        method: "HEAD",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Prefer": "count=exact",
+        },
+      });
+      return Number(res.headers.get("content-range")?.split("/")[1] || 0);
+    }
+    return getDb().prepare("SELECT COUNT(*) c FROM sales").get().c || 0;
+  },
+
+  async insertSale(sale) {
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("sales", "POST", sale);
+      return rows?.[0]?.id;
+    }
+    const info = getDb().prepare(`
+      INSERT INTO sales (receipt_no, timestamp, cashier, payment_method, subtotal, discount, tax, total, received, change_amount, currency)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(sale.receipt_no, sale.timestamp, sale.cashier, sale.payment_method,
+           sale.subtotal, sale.discount, sale.tax, sale.total, sale.received, sale.change_amount, sale.currency);
+    return info.lastInsertRowid;
+  },
+
+  async insertSaleItem(item) {
+    if (SUPABASE_URL) {
+      await sbQuery("sale_items", "POST", item);
+    } else {
+      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)")
+        .run(item.sale_id, item.product_id, item.name, item.price, item.qty);
+    }
+  },
+
+  async getAllSales() {
+    if (SUPABASE_URL) {
+      return await sbQuery("sales", "GET", null, "?order=id.desc");
+    }
+    return getDb().prepare("SELECT * FROM sales ORDER BY id DESC").all();
+  },
+
+  async getSaleItems(saleId) {
+    if (SUPABASE_URL) {
+      return await sbQuery("sale_items", "GET", null,
+        `?sale_id=eq.${saleId}&select=product_id,name,price,qty`);
+    }
+    return getDb().prepare("SELECT product_id as productId, name, price, qty FROM sale_items WHERE sale_id=?").all(saleId);
+  },
+
+  async clearHistory() {
+    if (SUPABASE_URL) {
+      await sbQuery("sale_items", "DELETE", null, "?id=gt.0");
+      await sbQuery("sales",      "DELETE", null, "?id=gt.0");
+    } else {
+      getDb().prepare("DELETE FROM sale_items").run();
+      getDb().prepare("DELETE FROM sales").run();
+    }
+  },
+
+  async getSettings() {
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("settings", "GET", null, "?select=key,value");
+      return Object.fromEntries((rows || []).map((x) => [x.key, x.value]));
+    }
+    return Object.fromEntries(
+      getDb().prepare("SELECT key, value FROM settings").all().map((x) => [x.key, x.value])
+    );
+  },
+
+  async updateSetting(key, value) {
+    if (SUPABASE_URL) {
+      await sbQuery("settings", "POST",
+        { key, value },
+        "");
+      // upsert
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/settings?key=eq.${key}`, {
+        method: "PATCH",
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify({ value }),
+      });
+      // If no rows updated, insert
+      if (res.headers.get("content-range") === "*/0") {
+        await sbQuery("settings", "POST", { key, value });
+      }
+    } else {
+      getDb().prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(key, value);
+    }
+  },
+};
+
+// ── BOOTSTRAP PAYLOAD ────────────────────────────────────────
+async function bootstrapPayload() {
+  const products  = await DB.getProducts();
+  const sales     = await DB.getAllSales();
+  const history   = await Promise.all(sales.map(async (s) => {
+    const items = await DB.getSaleItems(s.id);
+    return {
+      receiptNo:     s.receipt_no,
+      timestamp:     s.timestamp,
+      cashier:       s.cashier,
+      paymentMethod: s.payment_method,
+      subtotal:      s.subtotal,
+      discount:      s.discount,
+      tax:           s.tax,
+      total:         s.total,
+      received:      s.received,
+      change:        s.change_amount,
+      currency:      s.currency,
+      items: SUPABASE_URL
+        ? items.map(i => ({ productId: i.product_id, name: i.name, price: i.price, qty: i.qty }))
+        : items,
+    };
   }));
-  const settings = Object.fromEntries(db.prepare("SELECT key, value FROM settings").all().map((x) => [x.key, x.value]));
+  const settings = await DB.getSettings();
   return { products, history, settings };
 }
 
+// ── API HANDLERS ─────────────────────────────────────────────
 async function handleApi(req, res, pathname) {
-  if (pathname === "/api/health") return json(res, 200, { ok: true });
-  if (pathname === "/api/bootstrap") return json(res, 200, bootstrapPayload());
 
+  if (pathname === "/api/health") return json(res, 200, { ok: true });
+
+  // ── LOGIN ────────────────────────────────────────────────────
   if (pathname === "/api/login" && req.method === "POST") {
+    if (isRateLimited(getIp(req))) return json(res, 429, { error: "Too many attempts. Wait 1 minute." });
+
     const { username, password, role } = await parseBody(req);
-    const user = db.prepare("SELECT username, role FROM users WHERE lower(username)=lower(?) AND password=? AND role=?").get(username, password, role);
-    if (!user) return json(res, 401, { error: "Invalid credentials." });
-    return json(res, 200, { user });
+    if (!username || !password || !role) return json(res, 400, { error: "Missing fields." });
+    if (typeof username !== "string" || username.length > 50) return json(res, 400, { error: "Invalid username." });
+
+    const user = await DB.getUser(username, role);
+    if (!user || !verifyPassword(password, user.password)) {
+      return json(res, 401, { error: "Invalid credentials." });
+    }
+
+    const token = createToken({ username: user.username, role: user.role });
+    return json(res, 200, { user: { username: user.username, role: user.role }, token });
+  }
+
+  // ── All routes below require auth ────────────────────────────
+  if (pathname === "/api/bootstrap") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    return json(res, 200, await bootstrapPayload());
   }
 
   if (pathname === "/api/products" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const { name, sku, price, stock } = await parseBody(req);
-    if (!name || !sku || Number(price) < 0 || Number(stock) < 0) return json(res, 400, { error: "Invalid product payload." });
+    if (!name || !sku || isNaN(Number(price)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
+    if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
     try {
-      db.prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)").run(crypto.randomUUID(), name.trim(), sku.trim(), Number(price), Number(stock));
+      await DB.addProduct(crypto.randomUUID(), name.trim(), sku.trim(), Number(price), Number(stock));
       return json(res, 200, { ok: true });
-    } catch {
-      return json(res, 409, { error: "SKU already exists." });
-    }
+    } catch { return json(res, 409, { error: "SKU already exists." }); }
   }
 
   if (pathname.startsWith("/api/products/") && pathname.endsWith("/price") && req.method === "PATCH") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const sku = decodeURIComponent(pathname.replace("/api/products/", "").replace("/price", ""));
     const { price } = await parseBody(req);
-    const result = db.prepare("UPDATE products SET price=? WHERE lower(sku)=lower(?)").run(Number(price), sku);
-    if (!result.changes) return json(res, 404, { error: "Product not found." });
+    if (isNaN(Number(price)) || Number(price) < 0) return json(res, 400, { error: "Invalid price." });
+    const updated = await DB.updatePrice(sku, Number(price));
+    if (!updated) return json(res, 404, { error: "Product not found." });
     return json(res, 200, { ok: true });
   }
 
   if (pathname === "/api/sales" && req.method === "POST") {
+    const user = requireAuth(req);
+    if (!user) return json(res, 401, { error: "Login required." });
     const sale = await parseBody(req);
     if (!Array.isArray(sale.items) || !sale.items.length) return json(res, 400, { error: "Cart is empty." });
 
-    try {
-      db.exec("BEGIN");
-      for (const line of sale.items) {
-        const product = db.prepare("SELECT id, stock FROM products WHERE id=?").get(line.productId);
-        if (!product || product.stock < line.qty) throw new Error(`Insufficient stock for ${line.name}`);
+    // Validate stock
+    for (const line of sale.items) {
+      const product = await DB.getProductById(line.productId);
+      if (!product || product.stock < line.qty) {
+        return json(res, 400, { error: `Insufficient stock for ${line.name}` });
       }
-      for (const line of sale.items) {
-        db.prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(line.qty, line.productId);
-      }
-      const receiptNo = `R-${String((db.prepare("SELECT COUNT(*) c FROM sales").get().c || 0) + 1).padStart(5, "0")}`;
-      const timestamp = new Date().toISOString();
-      const info = db.prepare(`INSERT INTO sales (receipt_no, timestamp, cashier, payment_method, subtotal, discount, tax, total, received, change_amount, currency)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(receiptNo, timestamp, sale.cashier || "", sale.paymentMethod, sale.subtotal, sale.discount, sale.tax, sale.total, sale.received, sale.change, sale.currency || "USD");
-      const insertItem = db.prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)");
-      sale.items.forEach((line) => insertItem.run(info.lastInsertRowid, line.productId, line.name, line.price, line.qty));
-      db.exec("COMMIT");
-      return json(res, 200, { ok: true, receiptNo, timestamp });
-    } catch (e) {
-      db.exec("ROLLBACK");
-      return json(res, 400, { error: e.message || "Could not complete sale." });
     }
+
+    // Decrement stock
+    for (const line of sale.items) await DB.decrementStock(line.productId, line.qty);
+
+    const count     = await DB.getSalesCount();
+    const receiptNo = `R-${String(count + 1).padStart(5, "0")}`;
+    const timestamp = new Date().toISOString();
+
+    const saleId = await DB.insertSale({
+      receipt_no:    receiptNo,
+      timestamp,
+      cashier:       user.username, // always use authenticated user
+      payment_method: sale.paymentMethod,
+      subtotal:      sale.subtotal,
+      discount:      sale.discount,
+      tax:           sale.tax,
+      total:         sale.total,
+      received:      sale.received,
+      change_amount: sale.change,
+      currency:      sale.currency || "USD",
+    });
+
+    for (const line of sale.items) {
+      await DB.insertSaleItem({ sale_id: saleId, product_id: line.productId, name: line.name, price: line.price, qty: line.qty });
+    }
+
+    return json(res, 200, { ok: true, receiptNo, timestamp });
   }
 
   if (pathname === "/api/history" && req.method === "DELETE") {
-    db.prepare("DELETE FROM sale_items").run();
-    db.prepare("DELETE FROM sales").run();
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    await DB.clearHistory();
     return json(res, 200, { ok: true });
   }
 
   if (pathname === "/api/settings" && req.method === "PUT") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const body = await parseBody(req);
-    const stmt = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
-    ["currency", "theme", "cashierName"].forEach((key) => {
-      if (body[key] !== undefined) stmt.run(key, String(body[key]));
-    });
+    for (const key of ["currency", "theme", "cashierName"]) {
+      if (body[key] !== undefined) await DB.updateSetting(key, String(body[key]).slice(0, 100));
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  if (pathname === "/api/change-password" && req.method === "POST") {
+    const user = requireAuth(req);
+    if (!user) return json(res, 401, { error: "Login required." });
+    const { currentPassword, newPassword } = await parseBody(req);
+    if (!currentPassword || !newPassword || newPassword.length < 8) {
+      return json(res, 400, { error: "New password must be at least 8 characters." });
+    }
+    const dbUser = await DB.getUser(user.username, user.role);
+    if (!verifyPassword(currentPassword, dbUser.password)) return json(res, 401, { error: "Wrong current password." });
+    await DB.updatePassword(user.username, hashPassword(newPassword));
     return json(res, 200, { ok: true });
   }
 
   return false;
 }
 
+// ── STATIC FILE SERVER ────────────────────────────────────────
 async function serveStatic(res, pathname) {
   const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const safePath = normalize(requested).replace(/^\.{2,}(\/|\\|$)/, "");
-  const filePath = join(ROOT, safePath);
+  const safePath  = normalize(requested).replace(/^\.{2,}(\/|\\|$)/, "");
+
+  if (BLOCKED_FILES.some((f) => safePath === f || safePath.startsWith(f + "/"))) {
+    res.writeHead(403, { "X-Content-Type-Options": "nosniff" });
+    res.end("Forbidden");
+    return;
+  }
+
+  // Serve only from /public folder
+  const filePath = join(ROOT, "public", safePath);
+  if (!filePath.startsWith(join(ROOT, "public"))) {
+    res.writeHead(403); res.end("Forbidden"); return;
+  }
 
   try {
     const content = await readFile(filePath);
-    res.writeHead(200, { "Content-Type": MIME[extname(filePath)] || "text/plain; charset=utf-8" });
+    res.writeHead(200, {
+      "Content-Type":           MIME[extname(filePath)] || "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options":         "DENY",
+    });
     res.end(content);
   } catch {
-    res.writeHead(404);
-    res.end("Not found");
+    res.writeHead(404); res.end("Not found");
   }
 }
 
-initDb();
+// ── SQLITE INIT (fallback only) ──────────────────────────────
+async function initSqlite() {
+  if (SUPABASE_URL) return; // skip if using Supabase
+  const { DatabaseSync } = await import("node:sqlite");
+  db = new DatabaseSync(join(ROOT, "novapos.db"));
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER);
+    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT);
+    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER);
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+  `);
+  const adminExists = db.prepare("SELECT id FROM users WHERE username='admin'").get();
+  if (!adminExists) {
+    db.prepare("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)").run("admin",   hashPassword("admin123"),  "admin");
+    db.prepare("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)").run("cashier", hashPassword("cash123"),   "user");
+    console.log("⚠️  Default users created. Change passwords after first login!");
+  }
+  const count = db.prepare("SELECT COUNT(*) c FROM products").get().c;
+  if (!count) {
+    const ins = db.prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)");
+    [
+      [crypto.randomUUID(), "Coffee 250g", "CF-250", 8.5, 42],
+      [crypto.randomUUID(), "Milk 1L",     "MLK-1L", 2.2, 25],
+      [crypto.randomUUID(), "Bread Loaf",  "BR-LOAF",1.8, 14],
+      [crypto.randomUUID(), "Chocolate Bar","CH-80", 1.25, 8],
+      [crypto.randomUUID(), "Orange Juice","OJ-1L",  3.9, 12],
+    ].forEach((row) => ins.run(...row));
+  }
+  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
+  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'light')").run();
+  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
+}
+
+// ── START ─────────────────────────────────────────────────────
+await initSqlite().catch((err) => console.warn("SQLite init skipped:", err.message));
 
 createServer(async (req, res) => {
+  const origin = process.env.ALLOWED_ORIGIN || "*";
+  res.setHeader("Access-Control-Allow-Origin",  origin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname.startsWith("/api/")) {
-    const handled = await handleApi(req, res, url.pathname);
-    if (handled === false) json(res, 404, { error: "Not found" });
+    try {
+      const handled = await handleApi(req, res, url.pathname);
+      if (handled === false) json(res, 404, { error: "Not found" });
+    } catch (err) {
+      console.error("API Error:", err.message);
+      json(res, 500, { error: "Internal server error." });
+    }
     return;
   }
   await serveStatic(res, url.pathname);
 }).listen(PORT, () => {
-  console.log(`NovaPOS backend running on http://localhost:${PORT}`);
+  console.log(`✅ NovaPOS running on http://localhost:${PORT}`);
+  console.log(SUPABASE_URL ? "🗄️  Using Supabase database" : "🗄️  Using local SQLite (set SUPABASE_URL to sync across devices)");
 });
