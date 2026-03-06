@@ -396,6 +396,13 @@ async function bootstrapPayload() {
     };
   }));
   const settings = await DB.getSettings();
+  // For Supabase: load extra features directly
+  if (SUPABASE_URL) {
+    const suppliersRaw = await sbQuery("suppliers","GET",null,"?select=id,name,phone,email&order=name").catch(()=>[]) || [];
+    const customersRaw = await sbQuery("customers","GET",null,"?select=id,name,phone,loyalty_points,member_discount,credit_balance&order=name").catch(()=>[]) || [];
+    const customers = customersRaw.map(c=>({ id:c.id, name:c.name, phone:c.phone, loyaltyPoints:c.loyalty_points, memberDiscount:c.member_discount, creditBalance:c.credit_balance }));
+    return { products, history, settings, suppliers: suppliersRaw, customers, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
+  }
   return { products, history, settings, ...sqliteFeatureData() };
 }
 
@@ -507,69 +514,96 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === "/api/suppliers" && req.method === "GET") {
     if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
-    if (SUPABASE_URL) return json(res, 200, { suppliers: [] });
+    if (SUPABASE_URL) {
+      const suppliers = await sbQuery("suppliers", "GET", null, "?select=id,name,phone,email&order=name") || [];
+      return json(res, 200, { suppliers });
+    }
     const suppliers = getDb().prepare("SELECT id, name, phone, email FROM suppliers ORDER BY name").all();
     return json(res, 200, { suppliers });
   }
 
   if (pathname === "/api/suppliers" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    if (SUPABASE_URL) return json(res, 400, { error: "Supplier module is available in SQLite mode." });
     const { name, phone, email } = await parseBody(req);
     if (!name) return json(res, 400, { error: "Supplier name required." });
-    getDb().prepare("INSERT INTO suppliers (name, phone, email) VALUES (?, ?, ?)").run(String(name).trim(), String(phone || "").trim(), String(email || "").trim());
+    if (SUPABASE_URL) {
+      await sbQuery("suppliers", "POST", { name: String(name).trim(), phone: String(phone||"").trim(), email: String(email||"").trim() });
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("INSERT INTO suppliers (name, phone, email) VALUES (?, ?, ?)").run(String(name).trim(), String(phone||"").trim(), String(email||"").trim());
     return json(res, 200, { ok: true });
   }
 
   if (pathname === "/api/purchase-orders" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    if (SUPABASE_URL) return json(res, 400, { error: "Purchase order module is available in SQLite mode." });
     const { supplierId, sku, qty, cost } = await parseBody(req);
     if (!supplierId || !sku || Number(qty) <= 0) return json(res, 400, { error: "Invalid purchase order." });
+    const poNumber = `PO-${Date.now()}`;
+    if (SUPABASE_URL) {
+      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku)}&limit=1`);
+      if (!products || !products.length) return json(res, 404, { error: "SKU not found." });
+      const product = products[0];
+      await sbQuery("purchase_orders", "POST", { supplier_id: Number(supplierId), po_number: poNumber, status: "Received", total: Number(cost||0)*Number(qty), created_at: new Date().toISOString() });
+      await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${product.id}`, {
+        method: "PATCH",
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
+        body: JSON.stringify({ stock: (product.stock||0) + Number(qty) })
+      });
+      return json(res, 200, { ok: true, poNumber });
+    }
     const dbx = getDb();
     const product = dbx.prepare("SELECT id FROM products WHERE lower(sku)=lower(?)").get(sku);
     if (!product) return json(res, 404, { error: "SKU not found." });
-    const poNumber = `PO-${Date.now()}`;
-    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', ?, ?)").run(Number(supplierId), poNumber, Number(cost || 0) * Number(qty), new Date().toISOString());
+    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', ?, ?)").run(Number(supplierId), poNumber, Number(cost||0)*Number(qty), new Date().toISOString());
     dbx.prepare("UPDATE products SET stock = stock + ? WHERE id=?").run(Number(qty), product.id);
     return json(res, 200, { ok: true, poNumber });
   }
 
   if (pathname === "/api/stock-transfer" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    if (SUPABASE_URL) return json(res, 400, { error: "Stock transfer module is available in SQLite mode." });
     const { sku, qty, fromStore, toStore } = await parseBody(req);
     const amount = Number(qty);
     if (!sku || amount <= 0 || !fromStore || !toStore) return json(res, 400, { error: "Invalid transfer payload." });
-    getDb().prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
+    if (SUPABASE_URL) {
+      await sbQuery("stock_transfers", "POST", { sku: String(sku).trim(), qty: amount, from_store: String(fromStore).trim(), to_store: String(toStore).trim(), created_at: new Date().toISOString() });
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)").run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
     return json(res, 200, { ok: true });
   }
 
   if (pathname === "/api/stock-batches" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    if (SUPABASE_URL) return json(res, 400, { error: "Batch tracking module is available in SQLite mode." });
     const { sku, batchNo, expiryDate, qty } = await parseBody(req);
     if (!sku || !batchNo || !expiryDate || Number(qty) <= 0) return json(res, 400, { error: "Invalid batch payload." });
-    getDb().prepare("INSERT INTO stock_batches (sku, batch_no, expiry_date, qty) VALUES (?, ?, ?, ?)")
-      .run(String(sku).trim(), String(batchNo).trim(), String(expiryDate), Number(qty));
+    if (SUPABASE_URL) {
+      await sbQuery("stock_batches", "POST", { sku: String(sku).trim(), batch_no: String(batchNo).trim(), expiry_date: String(expiryDate), qty: Number(qty) });
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("INSERT INTO stock_batches (sku, batch_no, expiry_date, qty) VALUES (?, ?, ?, ?)").run(String(sku).trim(), String(batchNo).trim(), String(expiryDate), Number(qty));
     return json(res, 200, { ok: true });
   }
 
   if (pathname === "/api/customers" && req.method === "GET") {
     if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
-    if (SUPABASE_URL) return json(res, 200, { customers: [] });
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("customers", "GET", null, "?select=id,name,phone,loyalty_points,member_discount,credit_balance&order=name") || [];
+      const customers = rows.map(c => ({ id: c.id, name: c.name, phone: c.phone, loyaltyPoints: c.loyalty_points, memberDiscount: c.member_discount, creditBalance: c.credit_balance }));
+      return json(res, 200, { customers });
+    }
     const customers = getDb().prepare("SELECT id, name, phone, loyalty_points as loyaltyPoints, member_discount as memberDiscount, credit_balance as creditBalance FROM customers ORDER BY name").all();
     return json(res, 200, { customers });
   }
 
   if (pathname === "/api/customers" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    if (SUPABASE_URL) return json(res, 400, { error: "Customer module is available in SQLite mode." });
     const { name, phone, memberDiscount, creditBalance } = await parseBody(req);
     if (!name || !phone) return json(res, 400, { error: "Name and phone required." });
-    getDb().prepare("INSERT INTO customers (name, phone, loyalty_points, member_discount, credit_balance) VALUES (?, ?, 0, ?, ?)")
-      .run(String(name).trim(), String(phone).trim(), Number(memberDiscount || 0), Number(creditBalance || 0));
+    if (SUPABASE_URL) {
+      await sbQuery("customers", "POST", { name: String(name).trim(), phone: String(phone).trim(), loyalty_points: 0, member_discount: Number(memberDiscount||0), credit_balance: Number(creditBalance||0) });
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("INSERT INTO customers (name, phone, loyalty_points, member_discount, credit_balance) VALUES (?, ?, 0, ?, ?)").run(String(name).trim(), String(phone).trim(), Number(memberDiscount||0), Number(creditBalance||0));
     return json(res, 200, { ok: true });
   }
 
