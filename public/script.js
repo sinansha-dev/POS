@@ -7,12 +7,7 @@ const state = {
   theme: "light",
   cashierName: "",
   heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
-  customerDb: JSON.parse(localStorage.getItem("novapos_customers") || "[]"),
-  suppliers: [],
-  purchaseOrders: [],
-  stockTransfers: [],
-  stockBatches: [],
-  reports: {}
+  customerDb: JSON.parse(localStorage.getItem("novapos_customers") || "[]")
 };
 
 const productGrid      = document.getElementById("productGrid");
@@ -25,8 +20,6 @@ const currencySelect   = document.getElementById("currencySelect");
 const darkModeBtn      = document.getElementById("darkModeBtn");
 const productSearch    = document.getElementById("productSearch");
 const barcodeInput     = document.getElementById("barcodeInput");
-const customerBody     = document.getElementById("customerBody");
-const adminOpsPanel    = document.getElementById("adminOpsPanel");
 
 // ── TOKEN STORAGE ─────────────────────────────────────────────
 function saveToken(token, user) {
@@ -153,8 +146,8 @@ async function loadBootstrap() {
   renderHistory();
   renderCart();
   renderKpis();
-  if (typeof renderCustomers === "function") renderCustomers();
-  if (typeof renderReports === "function") renderReports();
+  renderCustomers();
+  renderReports();
 }
 
 function renderProducts() {
@@ -336,150 +329,6 @@ function downloadReceipt() {
   URL.revokeObjectURL(a.href);
 }
 
-
-function renderCustomers() {
-  if (!customerBody) return;
-  customerBody.innerHTML = "";
-  state.customerDb.forEach(c => {
-    const row = document.createElement("tr");
-    row.innerHTML = `<td>${c.name}</td><td>${c.phone}</td><td>${c.loyaltyPoints || 0}</td><td>${c.memberDiscount || 0}%</td><td>${money(c.creditBalance || 0)}</td>`;
-    customerBody.appendChild(row);
-  });
-}
-
-function renderReports() {
-  const r = state.reports || {};
-  const fillList = (id, rows, fmt) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = "";
-    (rows || []).forEach(x => {
-      const li = document.createElement("li");
-      li.textContent = fmt(x);
-      el.appendChild(li);
-    });
-  };
-  fillList("dailySalesReport", r.dailySales, x => `${x.day}: ${money(x.revenue)} (${x.transactions} txns)`);
-  fillList("monthlyRevenueReport", r.monthlyRevenue, x => `${x.month}: ${money(x.revenue)}`);
-  fillList("bestSellingReport", r.bestSelling, x => `${x.name}: ${x.qty}`);
-  fillList("slowMovingReport", r.slowMoving, x => `${x.name}: ${x.qty}`);
-  fillList("cashSummaryReport", r.cashSummary, x => `${x.method}: ${money(x.amount)} (${x.count})`);
-  fillList("taxReport", r.taxReport, x => `${x.day}: GST ${money(x.gst)}`);
-  const pnl = r.profitLoss || {};
-  const pnlEl = document.getElementById("profitLossReport");
-  if (pnlEl) pnlEl.textContent = `Revenue: ${money(pnl.revenue)}
-COGS: ${money(pnl.cogs)}
-Gross Profit: ${money(pnl.grossProfit)}
-Stock Value: ${money(pnl.stockValue)}`;
-  drawDashboardChart(r.monthlyRevenue || []);
-}
-
-function drawDashboardChart(rows) {
-  const canvas = document.getElementById("dashboardChart");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!rows.length) return;
-  const vals = rows.map(r => Number(r.revenue) || 0).reverse();
-  const labels = rows.map(r => r.month).reverse();
-  const max = Math.max(...vals, 1);
-  const pad = 24;
-  const w = canvas.width - pad * 2;
-  const h = canvas.height - pad * 2;
-  ctx.strokeStyle = "#5b8def";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  vals.forEach((v, i) => {
-    const x = pad + (i * (w / Math.max(vals.length - 1, 1)));
-    const y = pad + h - (v / max) * h;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    ctx.fillStyle = "#93c5fd";
-    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#64748b";
-    ctx.fillText(labels[i], x - 12, canvas.height - 4);
-  });
-  ctx.stroke();
-}
-
-async function addSupplier(event) {
-  event.preventDefault();
-  try {
-  await api('/api/suppliers', { method: 'POST', body: JSON.stringify({
-    name: document.getElementById('supplierName').value,
-    phone: document.getElementById('supplierPhone').value,
-    email: document.getElementById('supplierEmail').value
-  })});
-  event.target.reset();
-  await loadBootstrap();
-  } catch (error) {
-    if (!sqliteOnlyFeatureNotice(error)) alert(error.message || "Operation failed");
-  }
-}
-
-async function receivePurchaseOrder(event) {
-  event.preventDefault();
-  try {
-  await api('/api/purchase-orders', { method: 'POST', body: JSON.stringify({
-    supplierId: Number(document.getElementById('poSupplierId').value),
-    sku: document.getElementById('poSku').value,
-    qty: Number(document.getElementById('poQty').value),
-    cost: Number(document.getElementById('poCost').value || 0)
-  })});
-  event.target.reset();
-  await loadBootstrap();
-  } catch (error) {
-    if (!sqliteOnlyFeatureNotice(error)) alert(error.message || "Operation failed");
-  }
-}
-
-async function stockTransfer(event) {
-  event.preventDefault();
-  try {
-  await api('/api/stock-transfer', { method: 'POST', body: JSON.stringify({
-    sku: document.getElementById('transferSku').value,
-    qty: Number(document.getElementById('transferQty').value),
-    fromStore: document.getElementById('fromStore').value,
-    toStore: document.getElementById('toStore').value,
-  })});
-  event.target.reset();
-  await loadBootstrap();
-  } catch (error) {
-    if (!sqliteOnlyFeatureNotice(error)) alert(error.message || "Operation failed");
-  }
-}
-
-async function addBatch(event) {
-  event.preventDefault();
-  try {
-  await api('/api/stock-batches', { method: 'POST', body: JSON.stringify({
-    sku: document.getElementById('batchSku').value,
-    batchNo: document.getElementById('batchNo').value,
-    expiryDate: document.getElementById('batchExpiry').value,
-    qty: Number(document.getElementById('batchQty').value)
-  })});
-  event.target.reset();
-  await loadBootstrap();
-  } catch (error) {
-    if (!sqliteOnlyFeatureNotice(error)) alert(error.message || "Operation failed");
-  }
-}
-
-async function addCustomer(event) {
-  event.preventDefault();
-  try {
-  await api('/api/customers', { method: 'POST', body: JSON.stringify({
-    name: document.getElementById('customerName').value,
-    phone: document.getElementById('customerPhone').value,
-    memberDiscount: Number(document.getElementById('memberDiscount').value || 0),
-    creditBalance: Number(document.getElementById('creditBalance').value || 0)
-  })});
-  event.target.reset();
-  await loadBootstrap();
-  } catch (error) {
-    if (!sqliteOnlyFeatureNotice(error)) alert(error.message || "Operation failed");
-  }
-}
-
 async function completeSale(event) {
   event.preventDefault();
   if (!state.currentUser) { alert("Please login first."); return; }
@@ -562,11 +411,6 @@ function init() {
   document.getElementById("clearHistoryBtn").addEventListener("click", clearHistory);
   document.getElementById("newSaleBtn").addEventListener("click", resetSale);
   document.getElementById("printReceiptBtn").addEventListener("click", () => window.print());
-  document.getElementById("supplierForm")?.addEventListener("submit", addSupplier);
-  document.getElementById("purchaseOrderForm")?.addEventListener("submit", receivePurchaseOrder);
-  document.getElementById("stockTransferForm")?.addEventListener("submit", stockTransfer);
-  document.getElementById("batchForm")?.addEventListener("submit", addBatch);
-  document.getElementById("customerForm")?.addEventListener("submit", addCustomer);
 
   ["discount", "tax", "amountReceived", "splitCash", "splitCard", "splitWallet"].forEach(id =>
     document.getElementById(id)?.addEventListener("input", renderTotals)
