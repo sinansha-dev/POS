@@ -60,441 +60,9 @@ function isRateLimited(ip) {
   }
   if (entry.count >= RATE_LIMIT_MAX) return true;
   entry.count++;
-
-  // ── REFUND ────────────────────────────────────────────────────
-  if (pathname === "/api/refund" && req.method === "POST") {
-    const user = requireAuth(req);
-    if (!user) return json(res, 401, { error: "Login required." });
-    const { receiptNo, reason } = await parseBody(req);
-    if (!receiptNo) return json(res, 400, { error: "Receipt number required." });
-    const refundNo = `REF-${receiptNo}`;
-
-    if (SUPABASE_URL) {
-      const sales = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(receiptNo)}&limit=1`);
-      if (!sales || !sales.length) return json(res, 404, { error: "Receipt not found." });
-      const sale  = sales[0];
-      // Check not already refunded
-      const existing = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(refundNo)}&limit=1`);
-      if (existing && existing.length) return json(res, 409, { error: "Already refunded." });
-      // Restore stock — fetch items then increment
-      const items = await sbQuery("sale_items","GET",null,`?sale_id=eq.${sale.id}&select=product_id,qty`) || [];
-      for (const item of items) {
-        await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${item.product_id}`, {
-          method: "POST", headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal" },
-        }).catch(()=>null);
-        // Direct increment via rpc or manual
-        const prod = await sbQuery("products","GET",null,`?id=eq.${item.product_id}&select=id,stock&limit=1`);
-        if (prod && prod[0]) {
-          await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${item.product_id}`, {
-            method:"PATCH", headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json","Prefer":"return=minimal"},
-            body: JSON.stringify({ stock: (prod[0].stock||0) + item.qty })
-          });
-        }
-      }
-      await sbQuery("sales","POST",{ receipt_no:refundNo, timestamp:new Date().toISOString(), cashier:user.username, payment_method:"REFUND", subtotal:-(sale.subtotal||0), discount:0, tax:-(sale.tax||0), total:-(sale.total||0), received:0, change_amount:sale.total||0, currency:sale.currency||"USD" });
-      return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
-    }
-
-    // SQLite path
-    const dbx  = getDb();
-    const sale = dbx.prepare("SELECT * FROM sales WHERE receipt_no=?").get(receiptNo);
-    if (!sale) return json(res, 404, { error: "Receipt not found." });
-    const dup = dbx.prepare("SELECT id FROM sales WHERE receipt_no=?").get(refundNo);
-    if (dup)   return json(res, 409, { error: "Already refunded." });
-    const items = dbx.prepare("SELECT product_id, qty FROM sale_items WHERE sale_id=?").all(sale.id);
-    for (const item of items) dbx.prepare("UPDATE products SET stock=stock+? WHERE id=?").run(item.qty, item.product_id);
-    dbx.prepare("INSERT INTO sales (receipt_no,timestamp,cashier,payment_method,subtotal,discount,tax,total,received,change_amount,currency) VALUES(?,?,?,'REFUND',?,0,?,?,0,?,?)").run(refundNo,new Date().toISOString(),user.username,-(sale.subtotal||0),-(sale.tax||0),-(sale.total||0),sale.total||0,sale.currency||"USD");
-    return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
-  }
-
-  // ── REPORTS ───────────────────────────────────────────────────
-  if (pathname === "/api/reports" && req.method === "GET") {
-    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
-
-    if (!SUPABASE_URL) {
-      return json(res, 200, { reports: sqliteFeatureData().reports });
-    }
-
-    // Supabase: aggregate from raw sales + sale_items
-    const sales = await sbQuery("sales","GET",null,"?select=timestamp,total,tax,payment_method,subtotal&order=timestamp.desc") || [];
-    const items = await sbQuery("sale_items","GET",null,"?select=name,qty,price") || [];
-
-    const dailyMap = {}, monthMap = {}, taxMap = {}, cashMap = {}, itemMap = {};
-    for (const s of sales) {
-      if ((s.total||0) < 0) continue;
-      const day   = (s.timestamp||"").slice(0,10);
-      const month = (s.timestamp||"").slice(0,7);
-      if (!day) continue;
-      if (!dailyMap[day])  dailyMap[day]  = { day,   revenue:0, transactions:0 };
-      if (!monthMap[month])monthMap[month]= { month, revenue:0 };
-      if (!taxMap[day])    taxMap[day]    = { day,   gst:0 };
-      const m = s.payment_method || "Other";
-      if (!cashMap[m])     cashMap[m]     = { method:m, amount:0, count:0 };
-      dailyMap[day].revenue      = +((dailyMap[day].revenue||0)+(s.total||0)).toFixed(2);
-      dailyMap[day].transactions++;
-      monthMap[month].revenue    = +((monthMap[month].revenue||0)+(s.total||0)).toFixed(2);
-      taxMap[day].gst            = +((taxMap[day].gst||0)+(s.tax||0)).toFixed(2);
-      cashMap[m].amount          = +((cashMap[m].amount||0)+(s.total||0)).toFixed(2);
-      cashMap[m].count++;
-    }
-    for (const i of items) {
-      if (!itemMap[i.name]) itemMap[i.name]={ name:i.name, qty:0 };
-      itemMap[i.name].qty += i.qty||0;
-    }
-    const allItems    = Object.values(itemMap);
-    const revenue     = +sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
-    const cogs        = +items.reduce((a,i)=>a+(i.price||0)*(i.qty||0),0).toFixed(2);
-    return json(res, 200, { reports: {
-      dailySales:    Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
-      monthlyRevenue:Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
-      bestSelling:   allItems.sort((a,b)=>b.qty-a.qty).slice(0,10),
-      slowMoving:    allItems.sort((a,b)=>a.qty-b.qty).slice(0,10),
-      taxReport:     Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
-      cashSummary:   Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
-      profitLoss:    { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue:0 }
-    }});
-  }
-
   return false;
 }
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, e] of rateLimitMap) if (now > e.resetAt) rateLimitMap.delete(ip);
-}, 300_000);
 
-// ── PASSWORD HASHING ─────────────────────────────────────────
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
-  const hash = crypto.createHmac("sha256", salt).update(password).digest("hex");
-  return `${salt}:${hash}`;
-}
-function verifyPassword(password, stored) {
-  const [salt] = stored.split(":");
-  return hashPassword(password, salt) === stored;
-}
-
-// ── JWT ──────────────────────────────────────────────────────
-function b64url(str) {
-  return Buffer.from(str).toString("base64")
-    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-function createToken(payload) {
-  const h   = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const b   = b64url(JSON.stringify({ ...payload, iat: Date.now(), exp: Date.now() + 8 * 3600_000 }));
-  const sig = crypto.createHmac("sha256", JWT_SECRET).update(`${h}.${b}`).digest("base64")
-    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-  return `${h}.${b}.${sig}`;
-}
-function verifyToken(token) {
-  try {
-    const [h, b, sig] = token.split(".");
-    const expected = crypto.createHmac("sha256", JWT_SECRET).update(`${h}.${b}`).digest("base64")
-      .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-    if (sig !== expected) return null;
-    const payload = JSON.parse(Buffer.from(b, "base64").toString());
-    if (payload.exp < Date.now()) return null;
-    return payload;
-  } catch { return null; }
-}
-function requireAuth(req) {
-  const h = req.headers["authorization"];
-  if (!h?.startsWith("Bearer ")) return null;
-  return verifyToken(h.split(" ")[1]);
-}
-function requireAdmin(req) {
-  const u = requireAuth(req);
-  return u?.role === "admin" ? u : null;
-}
-
-// ── HELPERS ──────────────────────────────────────────────────
-function json(res, code, payload) {
-  res.writeHead(code, {
-    "Content-Type":              "application/json; charset=utf-8",
-    "X-Content-Type-Options":   "nosniff",
-    "X-Frame-Options":           "DENY",
-    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-  });
-  res.end(JSON.stringify(payload));
-}
-async function parseBody(req) {
-  let data = "";
-  for await (const chunk of req) {
-    data += chunk;
-    if (data.length > 100_000) throw new Error("Request too large.");
-  }
-  return data ? JSON.parse(data) : {};
-}
-function getIp(req) {
-  return req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress || "unknown";
-}
-
-// ── SUPABASE CLIENT ──────────────────────────────────────────
-// Thin fetch-based client — no npm package needed!
-async function sbQuery(table, method = "GET", body = null, filters = "") {
-  const url = `${SUPABASE_URL}/rest/v1/${table}${filters}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "apikey":        SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-      "Content-Type":  "application/json",
-      "Prefer":        method === "POST" ? "return=representation" : "return=minimal",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Supabase error: ${err}`);
-  }
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
-
-// Supabase RPC for raw SQL (used for seeding)
-async function sbRpc(fn, params = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
-    method: "POST",
-    headers: {
-      "apikey":        SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-      "Content-Type":  "application/json",
-    },
-    body: JSON.stringify(params),
-  });
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
-
-// ── SQLITE FALLBACK (when no Supabase) ──────────────────────
-let db = null;
-function getDb() {
-  return db; // db is initialized by initSqlite() at startup
-}
-
-// ── DB ABSTRACTION ───────────────────────────────────────────
-// Unified interface — uses Supabase if env vars set, else SQLite
-const DB = {
-  async getUser(username, role) {
-    if (SUPABASE_URL) {
-      const rows = await sbQuery("users", "GET", null,
-        `?select=username,password,role&username=ilike.${encodeURIComponent(username)}&role=eq.${role}&limit=1`);
-      return rows?.[0] || null;
-    }
-    return getDb().prepare("SELECT username, password, role FROM users WHERE lower(username)=lower(?) AND role=?").get(username, role);
-  },
-
-  async updatePassword(username, hashedPassword) {
-    if (SUPABASE_URL) {
-      await sbQuery("users", "PATCH", { password: hashedPassword }, `?username=eq.${username}`);
-    } else {
-      getDb().prepare("UPDATE users SET password=? WHERE username=?").run(hashedPassword, username);
-    }
-  },
-
-  async getProducts() {
-    if (SUPABASE_URL) {
-      return await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock&order=name");
-    }
-    return getDb().prepare("SELECT id, name, sku, price, stock FROM products ORDER BY name").all();
-  },
-
-  async addProduct(id, name, sku, price, stock) {
-    if (SUPABASE_URL) {
-      await sbQuery("products", "POST", { id, name, sku, price, stock });
-    } else {
-      getDb().prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)").run(id, name, sku, price, stock);
-    }
-  },
-
-  async updatePrice(sku, price) {
-    if (SUPABASE_URL) {
-      const result = await sbQuery("products", "PATCH", { price }, `?sku=ilike.${encodeURIComponent(sku)}`);
-      return result?.length > 0 || true;
-    }
-    const r = getDb().prepare("UPDATE products SET price=? WHERE lower(sku)=lower(?)").run(price, sku);
-    return r.changes > 0;
-  },
-
-  async getProductById(id) {
-    if (SUPABASE_URL) {
-      const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&limit=1`);
-      return rows?.[0] || null;
-    }
-    return getDb().prepare("SELECT id, stock FROM products WHERE id=?").get(id);
-  },
-
-  async decrementStock(id, qty) {
-    if (SUPABASE_URL) {
-      // Use RPC for atomic decrement
-      await sbRpc("decrement_stock", { p_id: id, p_qty: qty });
-    } else {
-      getDb().prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(qty, id);
-    }
-  },
-
-  async getSalesCount() {
-    if (SUPABASE_URL) {
-      const rows = await sbQuery("sales", "GET", null, "?select=id&limit=1&order=id.desc");
-      // Get count via head request
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/sales?select=id`, {
-        method: "HEAD",
-        headers: {
-          "apikey": SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Prefer": "count=exact",
-        },
-      });
-      return Number(res.headers.get("content-range")?.split("/")[1] || 0);
-    }
-    return getDb().prepare("SELECT COUNT(*) c FROM sales").get().c || 0;
-  },
-
-  async insertSale(sale) {
-    if (SUPABASE_URL) {
-      const rows = await sbQuery("sales", "POST", sale);
-      return rows?.[0]?.id;
-    }
-    const info = getDb().prepare(`
-      INSERT INTO sales (receipt_no, timestamp, cashier, payment_method, subtotal, discount, tax, total, received, change_amount, currency)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(sale.receipt_no, sale.timestamp, sale.cashier, sale.payment_method,
-           sale.subtotal, sale.discount, sale.tax, sale.total, sale.received, sale.change_amount, sale.currency);
-    return info.lastInsertRowid;
-  },
-
-  async insertSaleItem(item) {
-    if (SUPABASE_URL) {
-      await sbQuery("sale_items", "POST", item);
-    } else {
-      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)")
-        .run(item.sale_id, item.product_id, item.name, item.price, item.qty);
-    }
-  },
-
-  async getAllSales() {
-    if (SUPABASE_URL) {
-      return await sbQuery("sales", "GET", null, "?order=id.desc");
-    }
-    return getDb().prepare("SELECT * FROM sales ORDER BY id DESC").all();
-  },
-
-  async getSaleItems(saleId) {
-    if (SUPABASE_URL) {
-      return await sbQuery("sale_items", "GET", null,
-        `?sale_id=eq.${saleId}&select=product_id,name,price,qty`);
-    }
-    return getDb().prepare("SELECT product_id as productId, name, price, qty FROM sale_items WHERE sale_id=?").all(saleId);
-  },
-
-  async clearHistory() {
-    if (SUPABASE_URL) {
-      await sbQuery("sale_items", "DELETE", null, "?id=gt.0");
-      await sbQuery("sales",      "DELETE", null, "?id=gt.0");
-    } else {
-      getDb().prepare("DELETE FROM sale_items").run();
-      getDb().prepare("DELETE FROM sales").run();
-    }
-  },
-
-  async getSettings() {
-    if (SUPABASE_URL) {
-      const rows = await sbQuery("settings", "GET", null, "?select=key,value");
-      return Object.fromEntries((rows || []).map((x) => [x.key, x.value]));
-    }
-    return Object.fromEntries(
-      getDb().prepare("SELECT key, value FROM settings").all().map((x) => [x.key, x.value])
-    );
-  },
-
-  async updateSetting(key, value) {
-    if (SUPABASE_URL) {
-      await sbQuery("settings", "POST",
-        { key, value },
-        "");
-      // upsert
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/settings?key=eq.${key}`, {
-        method: "PATCH",
-        headers: {
-          "apikey": SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json",
-          "Prefer": "return=minimal",
-        },
-        body: JSON.stringify({ value }),
-      });
-      // If no rows updated, insert
-      if (res.headers.get("content-range") === "*/0") {
-        await sbQuery("settings", "POST", { key, value });
-      }
-    } else {
-      getDb().prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-        .run(key, value);
-    }
-  },
-};
-
-function sqliteFeatureData() {
-  if (SUPABASE_URL) {
-    return { suppliers: [], purchaseOrders: [], stockTransfers: [], stockBatches: [], customers: [], reports: {} };
-  }
-  const dbx = getDb();
-  const suppliers = dbx.prepare("SELECT id, name, phone, email FROM suppliers ORDER BY name").all();
-  const purchaseOrders = dbx.prepare("SELECT id, supplier_id as supplierId, po_number as poNumber, status, total, created_at as createdAt FROM purchase_orders ORDER BY id DESC").all();
-  const stockTransfers = dbx.prepare("SELECT id, sku, qty, from_store as fromStore, to_store as toStore, created_at as createdAt FROM stock_transfers ORDER BY id DESC").all();
-  const stockBatches = dbx.prepare("SELECT id, sku, batch_no as batchNo, expiry_date as expiryDate, qty FROM stock_batches ORDER BY expiry_date ASC").all();
-  const customers = dbx.prepare("SELECT id, name, phone, loyalty_points as loyaltyPoints, member_discount as memberDiscount, credit_balance as creditBalance FROM customers ORDER BY name").all();
-
-  const dailySales = dbx.prepare("SELECT date(timestamp) as day, round(sum(total),2) as revenue, count(*) as transactions FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
-  const monthlyRevenue = dbx.prepare("SELECT substr(timestamp,1,7) as month, round(sum(total),2) as revenue FROM sales GROUP BY substr(timestamp,1,7) ORDER BY month DESC LIMIT 12").all();
-  const bestSelling = dbx.prepare("SELECT name, sum(qty) as qty FROM sale_items GROUP BY name ORDER BY qty DESC LIMIT 10").all();
-  const slowMoving = dbx.prepare("SELECT p.name, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id GROUP BY p.id ORDER BY qty ASC LIMIT 10").all();
-  const taxReport = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
-  const cashSummary = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales GROUP BY payment_method ORDER BY amount DESC").all();
-  const stockValue = dbx.prepare("SELECT round(sum(price * stock),2) as value FROM products").get()?.value || 0;
-  const revenue = dbx.prepare("SELECT round(sum(total),2) as v FROM sales").get()?.v || 0;
-  const cogs = dbx.prepare("SELECT round(sum(price * qty),2) as v FROM sale_items").get()?.v || 0;
-
-  return {
-    suppliers, purchaseOrders, stockTransfers, stockBatches, customers,
-    reports: {
-      dailySales,
-      monthlyRevenue,
-      bestSelling,
-      slowMoving,
-      taxReport,
-      cashSummary,
-      profitLoss: { revenue, cogs, grossProfit: Number((revenue - cogs).toFixed(2)), stockValue }
-    }
-  };
-}
-
-// ── BOOTSTRAP PAYLOAD ────────────────────────────────────────
-async function bootstrapPayload() {
-  const products  = await DB.getProducts();
-  const sales     = await DB.getAllSales();
-  const history   = await Promise.all(sales.map(async (s) => {
-    const items = await DB.getSaleItems(s.id);
-    return {
-      receiptNo:     s.receipt_no,
-      timestamp:     s.timestamp,
-      cashier:       s.cashier,
-      paymentMethod: s.payment_method,
-      subtotal:      s.subtotal,
-      discount:      s.discount,
-      tax:           s.tax,
-      total:         s.total,
-      received:      s.received,
-      change:        s.change_amount,
-      currency:      s.currency,
-      items: SUPABASE_URL
-        ? items.map(i => ({ productId: i.product_id, name: i.name, price: i.price, qty: i.qty }))
-        : items,
-    };
-  }));
-  const settings = await DB.getSettings();
-  return { products, history, settings, ...sqliteFeatureData() };
-}
-
-// ── API HANDLERS ─────────────────────────────────────────────
 async function handleApi(req, res, pathname) {
 
   if (pathname === "/api/health") return json(res, 200, { ok: true });
@@ -679,6 +247,85 @@ async function handleApi(req, res, pathname) {
     if (!verifyPassword(currentPassword, dbUser.password)) return json(res, 401, { error: "Wrong current password." });
     await DB.updatePassword(user.username, hashPassword(newPassword));
     return json(res, 200, { ok: true });
+  }
+
+
+  // ── REFUND ────────────────────────────────────────────────────
+  if (pathname === "/api/refund" && req.method === "POST") {
+    const user = requireAuth(req);
+    if (!user) return json(res, 401, { error: "Login required." });
+    const { receiptNo, reason } = await parseBody(req);
+    if (!receiptNo) return json(res, 400, { error: "Receipt number required." });
+    const refundNo = `REF-${receiptNo}`;
+
+    if (SUPABASE_URL) {
+      const sales = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(receiptNo)}&limit=1`);
+      if (!sales || !sales.length) return json(res, 404, { error: "Receipt not found." });
+      const sale = sales[0];
+      const existing = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(refundNo)}&limit=1`);
+      if (existing && existing.length) return json(res, 409, { error: "Already refunded." });
+      const items = await sbQuery("sale_items","GET",null,`?sale_id=eq.${sale.id}&select=product_id,qty`) || [];
+      for (const item of items) {
+        const prod = await sbQuery("products","GET",null,`?id=eq.${item.product_id}&select=id,stock&limit=1`);
+        if (prod && prod[0]) {
+          await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${item.product_id}`, {
+            method: "PATCH",
+            headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
+            body: JSON.stringify({ stock: (prod[0].stock || 0) + item.qty })
+          });
+        }
+      }
+      await sbQuery("sales","POST",{ receipt_no:refundNo, timestamp:new Date().toISOString(), cashier:user.username, payment_method:"REFUND", subtotal:-(sale.subtotal||0), discount:0, tax:-(sale.tax||0), total:-(sale.total||0), received:0, change_amount:sale.total||0, currency:sale.currency||"USD" });
+      return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
+    }
+
+    const dbx  = getDb();
+    const sale = dbx.prepare("SELECT * FROM sales WHERE receipt_no=?").get(receiptNo);
+    if (!sale) return json(res, 404, { error: "Receipt not found." });
+    if (dbx.prepare("SELECT id FROM sales WHERE receipt_no=?").get(refundNo)) return json(res, 409, { error: "Already refunded." });
+    const items = dbx.prepare("SELECT product_id, qty FROM sale_items WHERE sale_id=?").all(sale.id);
+    for (const item of items) dbx.prepare("UPDATE products SET stock=stock+? WHERE id=?").run(item.qty, item.product_id);
+    dbx.prepare("INSERT INTO sales (receipt_no,timestamp,cashier,payment_method,subtotal,discount,tax,total,received,change_amount,currency) VALUES(?,?,?,'REFUND',?,0,?,?,0,?,?)").run(refundNo, new Date().toISOString(), user.username, -(sale.subtotal||0), -(sale.tax||0), -(sale.total||0), sale.total||0, sale.currency||"USD");
+    return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
+  }
+
+  // ── REPORTS ───────────────────────────────────────────────────
+  if (pathname === "/api/reports" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    if (!SUPABASE_URL) return json(res, 200, { reports: sqliteFeatureData().reports });
+
+    const sales = await sbQuery("sales","GET",null,"?select=timestamp,total,tax,payment_method,subtotal&order=timestamp.desc") || [];
+    const items = await sbQuery("sale_items","GET",null,"?select=name,qty,price") || [];
+    const dailyMap={}, monthMap={}, taxMap={}, cashMap={}, itemMap={};
+    for (const s of sales) {
+      if ((s.total||0) < 0) continue;
+      const day=s.timestamp?.slice(0,10), month=s.timestamp?.slice(0,7);
+      if (!day) continue;
+      if (!dailyMap[day])   dailyMap[day]  ={day,   revenue:0, transactions:0};
+      if (!monthMap[month]) monthMap[month]={month, revenue:0};
+      if (!taxMap[day])     taxMap[day]    ={day,   gst:0};
+      const m=s.payment_method||"Other";
+      if (!cashMap[m])      cashMap[m]     ={method:m, amount:0, count:0};
+      dailyMap[day].revenue      =+((dailyMap[day].revenue||0)  +(s.total||0)).toFixed(2);
+      dailyMap[day].transactions++;
+      monthMap[month].revenue    =+((monthMap[month].revenue||0)+(s.total||0)).toFixed(2);
+      taxMap[day].gst            =+((taxMap[day].gst||0)        +(s.tax||0)).toFixed(2);
+      cashMap[m].amount          =+((cashMap[m].amount||0)      +(s.total||0)).toFixed(2);
+      cashMap[m].count++;
+    }
+    for (const i of items) { if (!itemMap[i.name]) itemMap[i.name]={name:i.name,qty:0}; itemMap[i.name].qty+=i.qty||0; }
+    const allItems=Object.values(itemMap);
+    const revenue=+sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
+    const cogs=+items.reduce((a,i)=>a+(i.price||0)*(i.qty||0),0).toFixed(2);
+    return json(res, 200, { reports: {
+      dailySales:    Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
+      monthlyRevenue:Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
+      bestSelling:   [...allItems].sort((a,b)=>b.qty-a.qty).slice(0,10),
+      slowMoving:    [...allItems].sort((a,b)=>a.qty-b.qty).slice(0,10),
+      taxReport:     Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
+      cashSummary:   Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
+      profitLoss:    { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue:0 }
+    }});
   }
 
   return false;
