@@ -214,3 +214,119 @@ body.authenticated #loginOverlay {
 
 
 .quick-tools{display:flex;gap:.5rem;margin:0 0 1rem;flex-wrap:wrap}.quick-tools input{flex:1;min-width:240px}.split-payments{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:.5rem}.receipt-actions{display:flex;gap:.5rem;align-items:center}
+
+/* ── OPS / ADMIN PANELS ─────────────────────────────────── */
+.ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+.ops-grid form {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.ops-grid form strong {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+.ops-grid input,
+.ops-grid select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  box-sizing: border-box;
+}
+.ops-grid .btn { width: 100%; margin-top: 0.25rem; }
+
+/* ── REPORTS ─────────────────────────────────────────────── */
+.reports-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.2rem;
+}
+.reports-grid article {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.reports-grid h4 {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.reports-grid ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.reports-grid pre {
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  color: var(--text);
+  line-height: 1.6;
+}
+#dashboardChart {
+  width: 100% !important;
+  max-height: 260px;
+  margin-top: 1rem;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+}
+
+/* ── CRM / CUSTOMERS ─────────────────────────────────────── */
+.crm-panel .inventory-form {
+  margin-bottom: 1rem;
+}
+
+/* ── ADMIN OPS PANEL ─────────────────────────────────────── */
+.admin-ops-panel .ops-grid form {
+  min-width: 0;
+}
+
+/* ── HELD ORDERS LIST ────────────────────────────────────── */
+#heldOrdersList {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  background: var(--surface-soft);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* ── RECEIPT PRINT ───────────────────────────────────────── */
+@media print {
+  body * { visibility: hidden; }
+  #receipt, #receipt * { visibility: visible; }
+  #receipt {
+    position: absolute; left: 1rem; top: 1rem;
+    width: calc(100% - 2rem);
+    border: none; box-shadow: none;
+  }
+}
+
+/* ── RESPONSIVE ──────────────────────────────────────────── */
+@media (max-width: 700px) {
+  .ops-grid { grid-template-columns: 1fr; }
+  .reports-grid { grid-template-columns: 1fr; }
+  .topbar { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+  .topbar-actions { flex-wrap: wrap; }
+}
