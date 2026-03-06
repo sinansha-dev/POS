@@ -5,7 +5,14 @@ const state = {
   currentUser: null,
   currency: "USD",
   theme: "light",
-  cashierName: ""
+  cashierName: "",
+  heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
+  customerDb: JSON.parse(localStorage.getItem("novapos_customers") || "[]"),
+  suppliers: [],
+  purchaseOrders: [],
+  stockTransfers: [],
+  stockBatches: [],
+  reports: {}
 };
 
 const productGrid      = document.getElementById("productGrid");
@@ -17,6 +24,8 @@ const inventoryAdmin   = document.getElementById("inventoryAdmin");
 const currencySelect   = document.getElementById("currencySelect");
 const darkModeBtn      = document.getElementById("darkModeBtn");
 const productSearch    = document.getElementById("productSearch");
+const barcodeInput     = document.getElementById("barcodeInput");
+const customerBody     = document.getElementById("customerBody");
 
 // ── TOKEN STORAGE ─────────────────────────────────────────────
 function saveToken(token, user) {
@@ -88,7 +97,12 @@ function saleTotals() {
   const taxable        = Math.max(subtotal - discountAmount, 0);
   const taxAmount      = taxable * taxRate;
   const total          = taxable + taxAmount;
-  const received       = Number(document.getElementById("amountReceived").value || 0);
+  const paymentMethod  = document.getElementById("paymentMethod").value;
+  const splitTotal = ["splitCash", "splitCard", "splitWallet"]
+    .reduce((sum, id) => sum + Number(document.getElementById(id)?.value || 0), 0);
+  const received = paymentMethod === "Split"
+    ? splitTotal
+    : Number(document.getElementById("amountReceived").value || 0);
   const change         = Math.max(received - total, 0);
   return { subtotal, discountAmount, taxAmount, total, received, change };
 }
@@ -120,6 +134,12 @@ async function loadBootstrap() {
   state.products    = data.products || [];
   state.history     = data.history  || [];
   state.currency    = data.settings?.currency    || "USD";
+  state.suppliers   = data.suppliers || [];
+  state.purchaseOrders = data.purchaseOrders || [];
+  state.stockTransfers = data.stockTransfers || [];
+  state.stockBatches = data.stockBatches || [];
+  state.customerDb  = data.customers || state.customerDb || [];
+  state.reports     = data.reports || {};
   state.theme       = data.settings?.theme       || "light";
   state.cashierName = state.currentUser?.username || "";
   currencySelect.value   = state.currency;
@@ -130,13 +150,15 @@ async function loadBootstrap() {
   renderHistory();
   renderCart();
   renderKpis();
+  renderCustomers();
+  renderReports();
 }
 
 function renderProducts() {
   productGrid.innerHTML = "";
   const term     = productSearch.value.trim().toLowerCase();
   const filtered = state.products.filter(p =>
-    !term || p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term)
+    !term || p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term) || (p.barcode || "").toLowerCase().includes(term)
   );
   if (filtered.length === 0) {
     productGrid.innerHTML = "<p style='color:var(--muted);padding:1rem'>No products found.</p>";
@@ -203,7 +225,9 @@ function renderHistory() {
       <td>${sale.items?.length || 0}</td>
       <td>${sale.paymentMethod || "-"}</td>
       <td>${money(sale.total)}</td>
+      <td><button class="btn ghost" type="button">Refund</button></td>
     `;
+    row.querySelector("button").addEventListener("click", () => alert("Refund/return request captured for " + sale.receiptNo));
     historyBody.appendChild(row);
   });
 }
@@ -258,6 +282,179 @@ function buildReceipt(sale, totals) {
     `Received: ${money(totals.received)}`,
     `Change:   ${money(totals.change)}`
   ].join("\n");
+}
+
+
+function saveHeldOrders() {
+  localStorage.setItem("novapos_held_orders", JSON.stringify(state.heldOrders));
+}
+
+function holdCurrentOrder() {
+  if (!state.cart.length) { alert("Cart is empty."); return; }
+  const held = {
+    id: crypto.randomUUID(),
+    cart: structuredClone(state.cart),
+    discount: document.getElementById("discount").value,
+    tax: document.getElementById("tax").value,
+    at: new Date().toISOString()
+  };
+  state.heldOrders.push(held);
+  saveHeldOrders();
+  resetSale();
+  alert("Order held successfully.");
+}
+
+function resumeHeldOrder() {
+  if (!state.heldOrders.length) { alert("No held orders."); return; }
+  const held = state.heldOrders.shift();
+  state.cart = held.cart || [];
+  document.getElementById("discount").value = held.discount || "0";
+  document.getElementById("tax").value = held.tax || "10";
+  saveHeldOrders();
+  renderCart();
+}
+
+function addBySkuOrBarcode(raw) {
+  const term = raw.trim().toLowerCase();
+  if (!term) return false;
+  const product = state.products.find(p => p.sku.toLowerCase() === term || (p.barcode || "").toLowerCase() === term || p.name.toLowerCase() === term);
+  if (!product) return false;
+  addToCart(product.id);
+  return true;
+}
+
+function downloadReceipt() {
+  const content = receiptContent.textContent || "";
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `receipt-${Date.now()}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+
+function renderCustomers() {
+  if (!customerBody) return;
+  customerBody.innerHTML = "";
+  state.customerDb.forEach(c => {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td>${c.name}</td><td>${c.phone}</td><td>${c.loyaltyPoints || 0}</td><td>${c.memberDiscount || 0}%</td><td>${money(c.creditBalance || 0)}</td>`;
+    customerBody.appendChild(row);
+  });
+}
+
+function renderReports() {
+  const r = state.reports || {};
+  const fillList = (id, rows, fmt) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = "";
+    (rows || []).forEach(x => {
+      const li = document.createElement("li");
+      li.textContent = fmt(x);
+      el.appendChild(li);
+    });
+  };
+  fillList("dailySalesReport", r.dailySales, x => `${x.day}: ${money(x.revenue)} (${x.transactions} txns)`);
+  fillList("monthlyRevenueReport", r.monthlyRevenue, x => `${x.month}: ${money(x.revenue)}`);
+  fillList("bestSellingReport", r.bestSelling, x => `${x.name}: ${x.qty}`);
+  fillList("slowMovingReport", r.slowMoving, x => `${x.name}: ${x.qty}`);
+  fillList("cashSummaryReport", r.cashSummary, x => `${x.method}: ${money(x.amount)} (${x.count})`);
+  fillList("taxReport", r.taxReport, x => `${x.day}: GST ${money(x.gst)}`);
+  const pnl = r.profitLoss || {};
+  const pnlEl = document.getElementById("profitLossReport");
+  if (pnlEl) pnlEl.textContent = `Revenue: ${money(pnl.revenue)}
+COGS: ${money(pnl.cogs)}
+Gross Profit: ${money(pnl.grossProfit)}
+Stock Value: ${money(pnl.stockValue)}`;
+  drawDashboardChart(r.monthlyRevenue || []);
+}
+
+function drawDashboardChart(rows) {
+  const canvas = document.getElementById("dashboardChart");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!rows.length) return;
+  const vals = rows.map(r => Number(r.revenue) || 0).reverse();
+  const labels = rows.map(r => r.month).reverse();
+  const max = Math.max(...vals, 1);
+  const pad = 24;
+  const w = canvas.width - pad * 2;
+  const h = canvas.height - pad * 2;
+  ctx.strokeStyle = "#5b8def";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  vals.forEach((v, i) => {
+    const x = pad + (i * (w / Math.max(vals.length - 1, 1)));
+    const y = pad + h - (v / max) * h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    ctx.fillStyle = "#93c5fd";
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#64748b";
+    ctx.fillText(labels[i], x - 12, canvas.height - 4);
+  });
+  ctx.stroke();
+}
+
+async function addSupplier(event) {
+  event.preventDefault();
+  await api('/api/suppliers', { method: 'POST', body: JSON.stringify({
+    name: document.getElementById('supplierName').value,
+    phone: document.getElementById('supplierPhone').value,
+    email: document.getElementById('supplierEmail').value
+  })});
+  event.target.reset();
+  await loadBootstrap();
+}
+
+async function receivePurchaseOrder(event) {
+  event.preventDefault();
+  await api('/api/purchase-orders', { method: 'POST', body: JSON.stringify({
+    supplierId: Number(document.getElementById('poSupplierId').value),
+    sku: document.getElementById('poSku').value,
+    qty: Number(document.getElementById('poQty').value),
+    cost: Number(document.getElementById('poCost').value || 0)
+  })});
+  event.target.reset();
+  await loadBootstrap();
+}
+
+async function stockTransfer(event) {
+  event.preventDefault();
+  await api('/api/stock-transfer', { method: 'POST', body: JSON.stringify({
+    sku: document.getElementById('transferSku').value,
+    qty: Number(document.getElementById('transferQty').value),
+    fromStore: document.getElementById('fromStore').value,
+    toStore: document.getElementById('toStore').value,
+  })});
+  event.target.reset();
+  await loadBootstrap();
+}
+
+async function addBatch(event) {
+  event.preventDefault();
+  await api('/api/stock-batches', { method: 'POST', body: JSON.stringify({
+    sku: document.getElementById('batchSku').value,
+    batchNo: document.getElementById('batchNo').value,
+    expiryDate: document.getElementById('batchExpiry').value,
+    qty: Number(document.getElementById('batchQty').value)
+  })});
+  event.target.reset();
+  await loadBootstrap();
+}
+
+async function addCustomer(event) {
+  event.preventDefault();
+  await api('/api/customers', { method: 'POST', body: JSON.stringify({
+    name: document.getElementById('customerName').value,
+    phone: document.getElementById('customerPhone').value,
+    memberDiscount: Number(document.getElementById('memberDiscount').value || 0),
+    creditBalance: Number(document.getElementById('creditBalance').value || 0)
+  })});
+  event.target.reset();
+  await loadBootstrap();
 }
 
 async function completeSale(event) {
@@ -331,12 +528,40 @@ function init() {
   document.getElementById("clearHistoryBtn").addEventListener("click", clearHistory);
   document.getElementById("newSaleBtn").addEventListener("click", resetSale);
   document.getElementById("printReceiptBtn").addEventListener("click", () => window.print());
+  document.getElementById("supplierForm")?.addEventListener("submit", addSupplier);
+  document.getElementById("purchaseOrderForm")?.addEventListener("submit", receivePurchaseOrder);
+  document.getElementById("stockTransferForm")?.addEventListener("submit", stockTransfer);
+  document.getElementById("batchForm")?.addEventListener("submit", addBatch);
+  document.getElementById("customerForm")?.addEventListener("submit", addCustomer);
 
-  ["discount", "tax", "amountReceived"].forEach(id =>
-    document.getElementById(id).addEventListener("input", renderTotals)
+  ["discount", "tax", "amountReceived", "splitCash", "splitCard", "splitWallet"].forEach(id =>
+    document.getElementById(id)?.addEventListener("input", renderTotals)
   );
 
   productSearch.addEventListener("input", renderProducts);
+
+  barcodeInput.addEventListener("keydown", e => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const ok = addBySkuOrBarcode(barcodeInput.value);
+    if (!ok) alert("No product found for scanned barcode / SKU.");
+    barcodeInput.value = "";
+  });
+
+  document.getElementById("gstPreset").addEventListener("change", e => {
+    if (e.target.value) document.getElementById("tax").value = e.target.value;
+    renderTotals();
+  });
+
+  document.getElementById("paymentMethod").addEventListener("change", e => {
+    const split = e.target.value === "Split";
+    document.getElementById("splitPaymentFields").hidden = !split;
+    renderTotals();
+  });
+
+  document.getElementById("holdOrderBtn").addEventListener("click", holdCurrentOrder);
+  document.getElementById("resumeOrderBtn").addEventListener("click", resumeHeldOrder);
+  document.getElementById("downloadReceiptBtn").addEventListener("click", downloadReceipt);
 
   currencySelect.addEventListener("change", async e => {
     state.currency = e.target.value;

@@ -70,7 +70,12 @@
       <div class="panel products-panel">
         <div class="panel-header">
           <h3>Products</h3>
-          <input id="productSearch" type="search" placeholder="Search SKU or name" />
+          <input id="productSearch" type="search" placeholder="Fast search: name, SKU, barcode" />
+        </div>
+        <div class="quick-tools">
+          <input id="barcodeInput" type="text" placeholder="Scan barcode / enter SKU then press Enter" />
+          <button id="holdOrderBtn" class="btn ghost" type="button">Hold Order</button>
+          <button id="resumeOrderBtn" class="btn ghost" type="button">Resume Held</button>
         </div>
         <div id="productGrid" class="product-grid"></div>
 
@@ -114,6 +119,16 @@
             <input id="tax" type="number" min="0" max="100" value="10" />
           </label>
           <label class="field">
+            <span>GST Preset</span>
+            <select id="gstPreset">
+              <option value="">Custom</option>
+              <option value="5">GST 5%</option>
+              <option value="12">GST 12%</option>
+              <option value="18">GST 18%</option>
+              <option value="28">GST 28%</option>
+            </select>
+          </label>
+          <label class="field">
             <span>Payment Method</span>
             <select id="paymentMethod">
               <option value="Cash">Cash</option>
@@ -122,6 +137,11 @@
               <option value="Split">Split</option>
             </select>
           </label>
+          <div id="splitPaymentFields" class="split-payments" hidden>
+            <label class="field"><span>Cash</span><input id="splitCash" type="number" min="0" step="0.01" value="0" /></label>
+            <label class="field"><span>Card</span><input id="splitCard" type="number" min="0" step="0.01" value="0" /></label>
+            <label class="field"><span>Wallet</span><input id="splitWallet" type="number" min="0" step="0.01" value="0" /></label>
+          </div>
           <label class="field">
             <span>Amount Received</span>
             <input id="amountReceived" type="number" min="0" step="0.01" value="0" />
@@ -141,7 +161,10 @@
         <article class="receipt" id="receipt">
           <div class="panel-header">
             <h4>Receipt Preview</h4>
-            <button id="printReceiptBtn" class="btn" type="button">Print Receipt</button>
+            <div class="receipt-actions">
+              <button id="printReceiptBtn" class="btn" type="button">Print Receipt</button>
+              <button id="downloadReceiptBtn" class="btn ghost" type="button">Download Receipt</button>
+            </div>
           </div>
           <pre id="receiptContent">No completed sale yet.</pre>
         </article>
@@ -158,13 +181,78 @@
           <thead>
             <tr>
               <th>Receipt #</th><th>Time</th><th>Cashier</th>
-              <th>Items</th><th>Payment</th><th>Total</th>
+              <th>Items</th><th>Payment</th><th>Total</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>
     </section>
+
+
+    <section class="panel admin-ops-panel" id="adminOpsPanel">
+      <div class="panel-header"><h3>Operations (Admin)</h3></div>
+      <div class="ops-grid">
+        <form id="supplierForm" class="inventory-form compact-form">
+          <strong>Supplier management</strong>
+          <input id="supplierName" type="text" placeholder="Supplier name" required />
+          <input id="supplierPhone" type="text" placeholder="Phone" />
+          <input id="supplierEmail" type="email" placeholder="Email" />
+          <button class="btn" type="submit">Add Supplier</button>
+        </form>
+        <form id="purchaseOrderForm" class="inventory-form compact-form">
+          <strong>Purchase order / stock update</strong>
+          <input id="poSupplierId" type="number" min="1" placeholder="Supplier ID" required />
+          <input id="poSku" type="text" placeholder="SKU" required />
+          <input id="poQty" type="number" min="1" placeholder="Qty" required />
+          <input id="poCost" type="number" min="0" step="0.01" placeholder="Unit cost" />
+          <button class="btn" type="submit">Receive PO</button>
+        </form>
+        <form id="stockTransferForm" class="inventory-form compact-form">
+          <strong>Stock transfer between stores</strong>
+          <input id="transferSku" type="text" placeholder="SKU" required />
+          <input id="transferQty" type="number" min="1" placeholder="Qty" required />
+          <input id="fromStore" type="text" placeholder="From store" required />
+          <input id="toStore" type="text" placeholder="To store" required />
+          <button class="btn" type="submit">Record Transfer</button>
+        </form>
+        <form id="batchForm" class="inventory-form compact-form">
+          <strong>Batch / expiry tracking</strong>
+          <input id="batchSku" type="text" placeholder="SKU" required />
+          <input id="batchNo" type="text" placeholder="Batch No" required />
+          <input id="batchExpiry" type="date" required />
+          <input id="batchQty" type="number" min="1" placeholder="Qty" required />
+          <button class="btn" type="submit">Add Batch</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel crm-panel">
+      <div class="panel-header"><h3>Customer Database</h3></div>
+      <form id="customerForm" class="inventory-form compact-form">
+        <input id="customerName" type="text" placeholder="Customer name" required />
+        <input id="customerPhone" type="text" placeholder="Phone number" required />
+        <input id="memberDiscount" type="number" min="0" max="100" value="0" placeholder="Member discount %" />
+        <input id="creditBalance" type="number" min="0" step="0.01" value="0" placeholder="Credit balance" />
+        <button class="btn" type="submit">Add Customer</button>
+      </form>
+      <div class="cart-list-wrap"><table><thead><tr><th>Name</th><th>Phone</th><th>Loyalty</th><th>Member %</th><th>Credit</th></tr></thead><tbody id="customerBody"></tbody></table></div>
+    </section>
+
+    <section class="panel reports-panel">
+      <div class="panel-header"><h3>Important Reports & Graph Dashboard</h3></div>
+      <div class="reports-grid">
+        <article><h4>Daily Sales</h4><ul id="dailySalesReport"></ul></article>
+        <article><h4>Monthly Revenue</h4><ul id="monthlyRevenueReport"></ul></article>
+        <article><h4>Profit & Loss</h4><pre id="profitLossReport"></pre></article>
+        <article><h4>Best Selling</h4><ul id="bestSellingReport"></ul></article>
+        <article><h4>Slow Moving</h4><ul id="slowMovingReport"></ul></article>
+        <article><h4>Cash Register Summary</h4><ul id="cashSummaryReport"></ul></article>
+        <article><h4>Tax Report (GST)</h4><ul id="taxReport"></ul></article>
+      </div>
+      <canvas id="dashboardChart" width="900" height="220"></canvas>
+    </section>
+
   </main>
 
   <script src="./script.js"></script>

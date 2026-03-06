@@ -211,3 +211,7 @@ body.authenticated #loginOverlay {
     box-shadow: none;
   }
 }
+
+
+.quick-tools{display:flex;gap:.5rem;margin:0 0 1rem;flex-wrap:wrap}.quick-tools input{flex:1;min-width:240px}.split-payments{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:.5rem}.receipt-actions{display:flex;gap:.5rem;align-items:center}
+.ops-grid,.reports-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.8rem}.reports-grid article{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.6rem}.reports-grid ul{padding-left:1rem;max-height:140px;overflow:auto}#dashboardChart{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:.8rem}.crm-panel table{width:100%}
