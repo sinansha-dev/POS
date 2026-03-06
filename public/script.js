@@ -128,6 +128,12 @@ async function loadBootstrap() {
   state.products    = data.products || [];
   state.history     = data.history  || [];
   state.currency    = data.settings?.currency    || "USD";
+  state.suppliers   = data.suppliers || [];
+  state.purchaseOrders = data.purchaseOrders || [];
+  state.stockTransfers = data.stockTransfers || [];
+  state.stockBatches = data.stockBatches || [];
+  state.customerDb  = data.customers || state.customerDb || [];
+  state.reports     = data.reports || {};
   state.theme       = data.settings?.theme       || "light";
   state.cashierName = state.currentUser?.username || "";
   currencySelect.value   = state.currency;
@@ -138,6 +144,8 @@ async function loadBootstrap() {
   renderHistory();
   renderCart();
   renderKpis();
+  renderCustomers();
+  renderReports();
 }
 
 function renderProducts() {
