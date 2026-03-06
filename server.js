@@ -60,6 +60,101 @@ function isRateLimited(ip) {
   }
   if (entry.count >= RATE_LIMIT_MAX) return true;
   entry.count++;
+
+  // ── REFUND ────────────────────────────────────────────────────
+  if (pathname === "/api/refund" && req.method === "POST") {
+    const user = requireAuth(req);
+    if (!user) return json(res, 401, { error: "Login required." });
+    const { receiptNo, reason } = await parseBody(req);
+    if (!receiptNo) return json(res, 400, { error: "Receipt number required." });
+    const refundNo = `REF-${receiptNo}`;
+
+    if (SUPABASE_URL) {
+      const sales = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(receiptNo)}&limit=1`);
+      if (!sales || !sales.length) return json(res, 404, { error: "Receipt not found." });
+      const sale  = sales[0];
+      // Check not already refunded
+      const existing = await sbQuery("sales","GET",null,`?receipt_no=eq.${encodeURIComponent(refundNo)}&limit=1`);
+      if (existing && existing.length) return json(res, 409, { error: "Already refunded." });
+      // Restore stock — fetch items then increment
+      const items = await sbQuery("sale_items","GET",null,`?sale_id=eq.${sale.id}&select=product_id,qty`) || [];
+      for (const item of items) {
+        await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${item.product_id}`, {
+          method: "POST", headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal" },
+        }).catch(()=>null);
+        // Direct increment via rpc or manual
+        const prod = await sbQuery("products","GET",null,`?id=eq.${item.product_id}&select=id,stock&limit=1`);
+        if (prod && prod[0]) {
+          await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${item.product_id}`, {
+            method:"PATCH", headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json","Prefer":"return=minimal"},
+            body: JSON.stringify({ stock: (prod[0].stock||0) + item.qty })
+          });
+        }
+      }
+      await sbQuery("sales","POST",{ receipt_no:refundNo, timestamp:new Date().toISOString(), cashier:user.username, payment_method:"REFUND", subtotal:-(sale.subtotal||0), discount:0, tax:-(sale.tax||0), total:-(sale.total||0), received:0, change_amount:sale.total||0, currency:sale.currency||"USD" });
+      return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
+    }
+
+    // SQLite path
+    const dbx  = getDb();
+    const sale = dbx.prepare("SELECT * FROM sales WHERE receipt_no=?").get(receiptNo);
+    if (!sale) return json(res, 404, { error: "Receipt not found." });
+    const dup = dbx.prepare("SELECT id FROM sales WHERE receipt_no=?").get(refundNo);
+    if (dup)   return json(res, 409, { error: "Already refunded." });
+    const items = dbx.prepare("SELECT product_id, qty FROM sale_items WHERE sale_id=?").all(sale.id);
+    for (const item of items) dbx.prepare("UPDATE products SET stock=stock+? WHERE id=?").run(item.qty, item.product_id);
+    dbx.prepare("INSERT INTO sales (receipt_no,timestamp,cashier,payment_method,subtotal,discount,tax,total,received,change_amount,currency) VALUES(?,?,?,'REFUND',?,0,?,?,0,?,?)").run(refundNo,new Date().toISOString(),user.username,-(sale.subtotal||0),-(sale.tax||0),-(sale.total||0),sale.total||0,sale.currency||"USD");
+    return json(res, 200, { ok:true, refundNo, amount: sale.total||0 });
+  }
+
+  // ── REPORTS ───────────────────────────────────────────────────
+  if (pathname === "/api/reports" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+
+    if (!SUPABASE_URL) {
+      return json(res, 200, { reports: sqliteFeatureData().reports });
+    }
+
+    // Supabase: aggregate from raw sales + sale_items
+    const sales = await sbQuery("sales","GET",null,"?select=timestamp,total,tax,payment_method,subtotal&order=timestamp.desc") || [];
+    const items = await sbQuery("sale_items","GET",null,"?select=name,qty,price") || [];
+
+    const dailyMap = {}, monthMap = {}, taxMap = {}, cashMap = {}, itemMap = {};
+    for (const s of sales) {
+      if ((s.total||0) < 0) continue;
+      const day   = (s.timestamp||"").slice(0,10);
+      const month = (s.timestamp||"").slice(0,7);
+      if (!day) continue;
+      if (!dailyMap[day])  dailyMap[day]  = { day,   revenue:0, transactions:0 };
+      if (!monthMap[month])monthMap[month]= { month, revenue:0 };
+      if (!taxMap[day])    taxMap[day]    = { day,   gst:0 };
+      const m = s.payment_method || "Other";
+      if (!cashMap[m])     cashMap[m]     = { method:m, amount:0, count:0 };
+      dailyMap[day].revenue      = +((dailyMap[day].revenue||0)+(s.total||0)).toFixed(2);
+      dailyMap[day].transactions++;
+      monthMap[month].revenue    = +((monthMap[month].revenue||0)+(s.total||0)).toFixed(2);
+      taxMap[day].gst            = +((taxMap[day].gst||0)+(s.tax||0)).toFixed(2);
+      cashMap[m].amount          = +((cashMap[m].amount||0)+(s.total||0)).toFixed(2);
+      cashMap[m].count++;
+    }
+    for (const i of items) {
+      if (!itemMap[i.name]) itemMap[i.name]={ name:i.name, qty:0 };
+      itemMap[i.name].qty += i.qty||0;
+    }
+    const allItems    = Object.values(itemMap);
+    const revenue     = +sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
+    const cogs        = +items.reduce((a,i)=>a+(i.price||0)*(i.qty||0),0).toFixed(2);
+    return json(res, 200, { reports: {
+      dailySales:    Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
+      monthlyRevenue:Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
+      bestSelling:   allItems.sort((a,b)=>b.qty-a.qty).slice(0,10),
+      slowMoving:    allItems.sort((a,b)=>a.qty-b.qty).slice(0,10),
+      taxReport:     Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
+      cashSummary:   Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
+      profitLoss:    { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue:0 }
+    }});
+  }
+
   return false;
 }
 setInterval(() => {
