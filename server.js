@@ -337,6 +337,41 @@ const DB = {
   },
 };
 
+function sqliteFeatureData() {
+  if (SUPABASE_URL) {
+    return { suppliers: [], purchaseOrders: [], stockTransfers: [], stockBatches: [], customers: [], reports: {} };
+  }
+  const dbx = getDb();
+  const suppliers = dbx.prepare("SELECT id, name, phone, email FROM suppliers ORDER BY name").all();
+  const purchaseOrders = dbx.prepare("SELECT id, supplier_id as supplierId, po_number as poNumber, status, total, created_at as createdAt FROM purchase_orders ORDER BY id DESC").all();
+  const stockTransfers = dbx.prepare("SELECT id, sku, qty, from_store as fromStore, to_store as toStore, created_at as createdAt FROM stock_transfers ORDER BY id DESC").all();
+  const stockBatches = dbx.prepare("SELECT id, sku, batch_no as batchNo, expiry_date as expiryDate, qty FROM stock_batches ORDER BY expiry_date ASC").all();
+  const customers = dbx.prepare("SELECT id, name, phone, loyalty_points as loyaltyPoints, member_discount as memberDiscount, credit_balance as creditBalance FROM customers ORDER BY name").all();
+
+  const dailySales = dbx.prepare("SELECT date(timestamp) as day, round(sum(total),2) as revenue, count(*) as transactions FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
+  const monthlyRevenue = dbx.prepare("SELECT substr(timestamp,1,7) as month, round(sum(total),2) as revenue FROM sales GROUP BY substr(timestamp,1,7) ORDER BY month DESC LIMIT 12").all();
+  const bestSelling = dbx.prepare("SELECT name, sum(qty) as qty FROM sale_items GROUP BY name ORDER BY qty DESC LIMIT 10").all();
+  const slowMoving = dbx.prepare("SELECT p.name, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id GROUP BY p.id ORDER BY qty ASC LIMIT 10").all();
+  const taxReport = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
+  const cashSummary = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales GROUP BY payment_method ORDER BY amount DESC").all();
+  const stockValue = dbx.prepare("SELECT round(sum(price * stock),2) as value FROM products").get()?.value || 0;
+  const revenue = dbx.prepare("SELECT round(sum(total),2) as v FROM sales").get()?.v || 0;
+  const cogs = dbx.prepare("SELECT round(sum(price * qty),2) as v FROM sale_items").get()?.v || 0;
+
+  return {
+    suppliers, purchaseOrders, stockTransfers, stockBatches, customers,
+    reports: {
+      dailySales,
+      monthlyRevenue,
+      bestSelling,
+      slowMoving,
+      taxReport,
+      cashSummary,
+      profitLoss: { revenue, cogs, grossProfit: Number((revenue - cogs).toFixed(2)), stockValue }
+    }
+  };
+}
+
 // ── BOOTSTRAP PAYLOAD ────────────────────────────────────────
 async function bootstrapPayload() {
   const products  = await DB.getProducts();
@@ -361,7 +396,7 @@ async function bootstrapPayload() {
     };
   }));
   const settings = await DB.getSettings();
-  return { products, history, settings };
+  return { products, history, settings, ...sqliteFeatureData() };
 }
 
 // ── API HANDLERS ─────────────────────────────────────────────
@@ -470,6 +505,74 @@ async function handleApi(req, res, pathname) {
     return json(res, 200, { ok: true });
   }
 
+  if (pathname === "/api/suppliers" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    if (SUPABASE_URL) return json(res, 200, { suppliers: [] });
+    const suppliers = getDb().prepare("SELECT id, name, phone, email FROM suppliers ORDER BY name").all();
+    return json(res, 200, { suppliers });
+  }
+
+  if (pathname === "/api/suppliers" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) return json(res, 400, { error: "Supplier module is available in SQLite mode." });
+    const { name, phone, email } = await parseBody(req);
+    if (!name) return json(res, 400, { error: "Supplier name required." });
+    getDb().prepare("INSERT INTO suppliers (name, phone, email) VALUES (?, ?, ?)").run(String(name).trim(), String(phone || "").trim(), String(email || "").trim());
+    return json(res, 200, { ok: true });
+  }
+
+  if (pathname === "/api/purchase-orders" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) return json(res, 400, { error: "Purchase order module is available in SQLite mode." });
+    const { supplierId, sku, qty, cost } = await parseBody(req);
+    if (!supplierId || !sku || Number(qty) <= 0) return json(res, 400, { error: "Invalid purchase order." });
+    const dbx = getDb();
+    const product = dbx.prepare("SELECT id FROM products WHERE lower(sku)=lower(?)").get(sku);
+    if (!product) return json(res, 404, { error: "SKU not found." });
+    const poNumber = `PO-${Date.now()}`;
+    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', ?, ?)").run(Number(supplierId), poNumber, Number(cost || 0) * Number(qty), new Date().toISOString());
+    dbx.prepare("UPDATE products SET stock = stock + ? WHERE id=?").run(Number(qty), product.id);
+    return json(res, 200, { ok: true, poNumber });
+  }
+
+  if (pathname === "/api/stock-transfer" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) return json(res, 400, { error: "Stock transfer module is available in SQLite mode." });
+    const { sku, qty, fromStore, toStore } = await parseBody(req);
+    const amount = Number(qty);
+    if (!sku || amount <= 0 || !fromStore || !toStore) return json(res, 400, { error: "Invalid transfer payload." });
+    getDb().prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
+    return json(res, 200, { ok: true });
+  }
+
+  if (pathname === "/api/stock-batches" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) return json(res, 400, { error: "Batch tracking module is available in SQLite mode." });
+    const { sku, batchNo, expiryDate, qty } = await parseBody(req);
+    if (!sku || !batchNo || !expiryDate || Number(qty) <= 0) return json(res, 400, { error: "Invalid batch payload." });
+    getDb().prepare("INSERT INTO stock_batches (sku, batch_no, expiry_date, qty) VALUES (?, ?, ?, ?)")
+      .run(String(sku).trim(), String(batchNo).trim(), String(expiryDate), Number(qty));
+    return json(res, 200, { ok: true });
+  }
+
+  if (pathname === "/api/customers" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    if (SUPABASE_URL) return json(res, 200, { customers: [] });
+    const customers = getDb().prepare("SELECT id, name, phone, loyalty_points as loyaltyPoints, member_discount as memberDiscount, credit_balance as creditBalance FROM customers ORDER BY name").all();
+    return json(res, 200, { customers });
+  }
+
+  if (pathname === "/api/customers" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) return json(res, 400, { error: "Customer module is available in SQLite mode." });
+    const { name, phone, memberDiscount, creditBalance } = await parseBody(req);
+    if (!name || !phone) return json(res, 400, { error: "Name and phone required." });
+    getDb().prepare("INSERT INTO customers (name, phone, loyalty_points, member_discount, credit_balance) VALUES (?, ?, 0, ?, ?)")
+      .run(String(name).trim(), String(phone).trim(), Number(memberDiscount || 0), Number(creditBalance || 0));
+    return json(res, 200, { ok: true });
+  }
+
   if (pathname === "/api/change-password" && req.method === "POST") {
     const user = requireAuth(req);
     if (!user) return json(res, 401, { error: "Login required." });
@@ -527,6 +630,11 @@ async function initSqlite() {
     CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT);
     CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, email TEXT);
+    CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, supplier_id INTEGER, po_number TEXT, status TEXT, total REAL, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS stock_transfers (id INTEGER PRIMARY KEY, sku TEXT, qty INTEGER, from_store TEXT, to_store TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS stock_batches (id INTEGER PRIMARY KEY, sku TEXT, batch_no TEXT, expiry_date TEXT, qty INTEGER);
+    CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT UNIQUE, loyalty_points INTEGER DEFAULT 0, member_discount REAL DEFAULT 0, credit_balance REAL DEFAULT 0);
   `);
   const adminExists = db.prepare("SELECT id FROM users WHERE username='admin'").get();
   if (!adminExists) {
@@ -548,6 +656,10 @@ async function initSqlite() {
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'light')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
+  db.prepare("INSERT OR IGNORE INTO suppliers (id, name, phone, email) VALUES (1, 'Fresh Farms', '+911111111111', 'ops@freshfarms.test')").run();
+  db.prepare("INSERT OR IGNORE INTO suppliers (id, name, phone, email) VALUES (2, 'City Wholesale', '+922222222222', 'supply@citywholesale.test')").run();
+  db.prepare("INSERT OR IGNORE INTO customers (id, name, phone, loyalty_points, member_discount, credit_balance) VALUES (1, 'Aisha Khan', '9000000001', 120, 5, 0)").run();
+  db.prepare("INSERT OR IGNORE INTO customers (id, name, phone, loyalty_points, member_discount, credit_balance) VALUES (2, 'Rahul Verma', '9000000002', 60, 2, 150)").run();
 }
 
 
