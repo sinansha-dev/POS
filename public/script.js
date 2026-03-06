@@ -76,9 +76,7 @@ function applyTheme() {
 function applySessionState() {
   const logged = Boolean(state.currentUser);
   document.body.classList.toggle("authenticated", logged);
-  const isAdmin = state.currentUser?.role === "admin";
-  inventoryAdmin.hidden = !isAdmin;
-  if (adminOpsPanel) adminOpsPanel.hidden = !isAdmin;
+  inventoryAdmin.hidden = state.currentUser?.role !== "admin";
 }
 
 function money(value) {
@@ -382,17 +380,6 @@ async function clearHistory() {
   await loadBootstrap();
 }
 
-
-function sqliteOnlyFeatureNotice(error) {
-  if (!error) return false;
-  const msg = String(error.message || error);
-  if (msg.includes("SQLite mode")) {
-    alert("This feature is not enabled on this deployment yet. Ask admin to enable SQLite mode or create Supabase modules for this feature.");
-    return true;
-  }
-  return false;
-}
-
 function resetSale() {
   state.cart = [];
   document.getElementById("discount").value       = "0";
@@ -461,17 +448,7 @@ function init() {
   if (savedUser && savedToken) {
     state.currentUser = savedUser;
     applySessionState();
-    loadBootstrap().catch((error) => {
-      const message = String(error?.message || error || "");
-      if (message.includes("Session expired") || message.includes("Login required")) {
-        clearToken();
-        state.currentUser = null;
-        applySessionState();
-        return;
-      }
-      console.error("Bootstrap load failed:", error);
-      alert("Some dashboard modules failed to load. Please refresh once.");
-    });
+    loadBootstrap().catch(() => { clearToken(); state.currentUser = null; applySessionState(); });
   }
 }
 
