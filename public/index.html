@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NovaPOS</title>
-   <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -252,6 +252,53 @@
         <article><h4>Tax Report (GST)</h4><ul id="taxReport"></ul></article>
       </div>
       <canvas id="dashboardChart" width="900" height="220"></canvas>
+    </section>
+
+
+    <!-- USER MANAGEMENT (Admin only) -->
+    <section class="panel user-mgmt-panel" id="userMgmtPanel" hidden>
+      <div class="panel-header">
+        <h3>👥 User Management</h3>
+      </div>
+      <div class="user-mgmt-grid">
+        <!-- Create User Form -->
+        <div class="user-form-card">
+          <strong>Create New User</strong>
+          <form id="createUserForm">
+            <div class="field">
+              <span>Username</span>
+              <input id="newUserUsername" type="text" placeholder="e.g. john" required minlength="3" maxlength="50"/>
+            </div>
+            <div class="field">
+              <span>Password</span>
+              <input id="newUserPassword" type="password" placeholder="Min 6 characters" required minlength="6"/>
+            </div>
+            <div class="field">
+              <span>Role</span>
+              <select id="newUserRole">
+                <option value="user">Cashier (User)</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <button class="btn" type="submit">➕ Create User</button>
+          </form>
+        </div>
+        <!-- Users List -->
+        <div class="user-form-card" style="grid-column: span 2">
+          <strong>All Users</strong>
+          <table style="width:100%;margin-top:0.5rem">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Reset Password</th>
+                <th>Delete</th>
+              </tr>
+            </thead>
+            <tbody id="usersTableBody"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
   </main>

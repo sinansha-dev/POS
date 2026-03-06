@@ -55,6 +55,8 @@ function applySessionState() {
   document.body.classList.toggle("authenticated", logged);
   if (inventoryAdmin) inventoryAdmin.hidden = !isAdmin;
   if (adminOpsPanel)  adminOpsPanel.hidden  = !isAdmin;
+  const userMgmtPanel = document.getElementById("userMgmtPanel");
+  if (userMgmtPanel) userMgmtPanel.hidden = !isAdmin;
   if (cashierNameInput) { cashierNameInput.value = state.currentUser?.username || ""; cashierNameInput.disabled = true; }
 }
 
@@ -106,6 +108,7 @@ async function loadBootstrap() {
   applyTheme();
   renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers();
   await loadReports();
+  if (state.currentUser?.role === "admin") await loadUsers();
 }
 
 function renderProducts() {
@@ -360,6 +363,75 @@ async function handleLogin(event) {
 
 function logout() { clearToken(); state.currentUser=null; state.cart=[]; applySessionState(); renderCart(); if(receiptContent)receiptContent.textContent="No completed sale yet."; }
 
+// ── USER MANAGEMENT ───────────────────────────────────────────
+async function loadUsers() {
+  try {
+    const data = await api("/api/users");
+    renderUsersTable(data.users || []);
+  } catch (e) { console.warn("Could not load users:", e.message); }
+}
+
+function renderUsersTable(users) {
+  const body = document.getElementById("usersTableBody");
+  if (!body) return;
+  body.innerHTML = "";
+  if (!users.length) {
+    body.innerHTML = "<tr><td colspan='4' style='color:var(--muted);text-align:center;padding:1rem'>No users found</td></tr>";
+    return;
+  }
+  users.forEach(u => {
+    const isSelf = u.username === state.currentUser?.username;
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><strong>${u.username}</strong> ${isSelf ? '<small style="color:var(--muted)">(you)</small>' : ''}</td>
+      <td><span class="role-badge ${u.role}">${u.role === 'admin' ? '🔑 Admin' : '👤 Cashier'}</span></td>
+      <td>
+        <button class="btn ghost" style="padding:0.25rem 0.6rem;font-size:0.78rem" onclick="resetUserPassword('${u.username}')">
+          🔑 Reset Password
+        </button>
+      </td>
+      <td>
+        ${isSelf ? '<span style="color:var(--muted);font-size:0.78rem">—</span>' :
+          `<button class="btn danger" style="padding:0.25rem 0.6rem;font-size:0.78rem" onclick="deleteUser('${u.username}')">🗑 Delete</button>`}
+      </td>
+    `;
+    body.appendChild(row);
+  });
+}
+
+async function createUser(event) {
+  event.preventDefault();
+  const username = document.getElementById("newUserUsername").value.trim();
+  const password = document.getElementById("newUserPassword").value;
+  const role     = document.getElementById("newUserRole").value;
+  try {
+    await api("/api/users", { method: "POST", body: JSON.stringify({ username, password, role }) });
+    event.target.reset();
+    alert(`✅ User "${username}" created!`);
+    await loadUsers();
+  } catch (err) { alert("❌ " + err.message); }
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+  try {
+    await api(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+    alert(`✅ User "${username}" deleted.`);
+    await loadUsers();
+  } catch (err) { alert("❌ " + err.message); }
+}
+
+async function resetUserPassword(username) {
+  const newPassword = prompt(`Reset password for "${username}":\nEnter new password (min 6 characters):`);
+  if (newPassword === null) return;
+  if (newPassword.length < 6) { alert("Password must be at least 6 characters."); return; }
+  try {
+    await api(`/api/users/${encodeURIComponent(username)}/reset-password`, { method: "POST", body: JSON.stringify({ newPassword }) });
+    alert(`✅ Password reset for "${username}"!`);
+  } catch (err) { alert("❌ " + err.message); }
+}
+
+
 function init() {
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
@@ -377,6 +449,7 @@ function init() {
   document.getElementById("stockTransferForm")?.addEventListener("submit",recordTransfer);
   document.getElementById("batchForm")?.addEventListener("submit",addBatch);
   document.getElementById("customerForm")?.addEventListener("submit",addCustomer);
+  document.getElementById("createUserForm")?.addEventListener("submit",createUser);
   barcodeInput?.addEventListener("keydown",handleBarcode);
   productSearch?.addEventListener("input",renderProducts);
   ["discount","tax","amountReceived","splitCash","splitCard","splitWallet"].forEach(id=>document.getElementById(id)?.addEventListener("input",renderTotals));

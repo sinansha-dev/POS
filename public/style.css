@@ -353,3 +353,45 @@ body.authenticated #loginOverlay {
 .totals strong {
   white-space: nowrap;
 }
+
+/* ── USER MANAGEMENT ─────────────────────────────────────── */
+.user-mgmt-panel { margin-top: 1rem; }
+.user-mgmt-grid {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+.user-form-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.user-form-card strong {
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.user-form-card .field input,
+.user-form-card .field select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.user-form-card .btn { width: 100%; margin-top: 0.25rem; }
+.role-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.role-badge.admin { background: rgba(37,99,235,0.15); color: var(--primary); }
+.role-badge.user  { background: rgba(22,163,74,0.15);  color: var(--success); }
+@media (max-width: 700px) {
+  .user-mgmt-grid { grid-template-columns: 1fr; }
+  .user-form-card[style*="span 2"] { grid-column: span 1; }
+}

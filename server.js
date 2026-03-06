@@ -699,6 +699,73 @@ async function handleApi(req, res, pathname) {
     }});
   }
 
+
+  // ── GET USERS (admin only) ────────────────────────────────────
+  if (pathname === "/api/users" && req.method === "GET") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("users", "GET", null, "?select=id,username,role&order=username") || [];
+      return json(res, 200, { users: rows });
+    }
+    const users = getDb().prepare("SELECT id, username, role FROM users ORDER BY username").all();
+    return json(res, 200, { users });
+  }
+
+  // ── CREATE USER (admin only) ──────────────────────────────────
+  if (pathname === "/api/users" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    const { username, password, role } = await parseBody(req);
+    if (!username || !password || !role) return json(res, 400, { error: "All fields required." });
+    if (username.length < 3 || username.length > 50) return json(res, 400, { error: "Username must be 3-50 chars." });
+    if (password.length < 6) return json(res, 400, { error: "Password must be at least 6 characters." });
+    if (!["admin","user"].includes(role)) return json(res, 400, { error: "Role must be admin or user." });
+    const hashed = hashPassword(password);
+    if (SUPABASE_URL) {
+      try {
+        await sbQuery("users", "POST", { username: username.trim(), password: hashed, role });
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        if (String(e.message).includes("duplicate") || String(e.message).includes("unique")) return json(res, 409, { error: "Username already exists." });
+        throw e;
+      }
+    }
+    try {
+      getDb().prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)").run(username.trim(), hashed, role);
+      return json(res, 200, { ok: true });
+    } catch (e) {
+      return json(res, 409, { error: "Username already exists." });
+    }
+  }
+
+  // ── DELETE USER (admin only) ──────────────────────────────────
+  if (pathname.startsWith("/api/users/") && req.method === "DELETE") {
+    const admin = requireAdmin(req);
+    if (!admin) return json(res, 403, { error: "Admin only." });
+    const targetUsername = decodeURIComponent(pathname.replace("/api/users/", ""));
+    if (targetUsername === admin.username) return json(res, 400, { error: "Cannot delete your own account." });
+    if (SUPABASE_URL) {
+      await sbQuery("users", "DELETE", null, `?username=eq.${encodeURIComponent(targetUsername)}`);
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("DELETE FROM users WHERE username=? AND username != ?").run(targetUsername, admin.username);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── RESET USER PASSWORD (admin only) ─────────────────────────
+  if (pathname.startsWith("/api/users/") && pathname.endsWith("/reset-password") && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    const targetUsername = decodeURIComponent(pathname.replace("/api/users/","").replace("/reset-password",""));
+    const { newPassword } = await parseBody(req);
+    if (!newPassword || newPassword.length < 6) return json(res, 400, { error: "Password must be at least 6 characters." });
+    const hashed = hashPassword(newPassword);
+    if (SUPABASE_URL) {
+      await sbQuery("users", "PATCH", { password: hashed }, `?username=eq.${encodeURIComponent(targetUsername)}`);
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("UPDATE users SET password=? WHERE username=?").run(hashed, targetUsername);
+    return json(res, 200, { ok: true });
+  }
+
   return false;
 }
 
