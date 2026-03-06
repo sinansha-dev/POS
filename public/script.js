@@ -5,7 +5,9 @@ const state = {
   currentUser: null,
   currency: "USD",
   theme: "light",
-  cashierName: ""
+  cashierName: "",
+  heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
+  customerDb: JSON.parse(localStorage.getItem("novapos_customers") || "[]")
 };
 
 const productGrid      = document.getElementById("productGrid");
@@ -17,6 +19,7 @@ const inventoryAdmin   = document.getElementById("inventoryAdmin");
 const currencySelect   = document.getElementById("currencySelect");
 const darkModeBtn      = document.getElementById("darkModeBtn");
 const productSearch    = document.getElementById("productSearch");
+const barcodeInput     = document.getElementById("barcodeInput");
 
 // ── TOKEN STORAGE ─────────────────────────────────────────────
 function saveToken(token, user) {
@@ -88,7 +91,12 @@ function saleTotals() {
   const taxable        = Math.max(subtotal - discountAmount, 0);
   const taxAmount      = taxable * taxRate;
   const total          = taxable + taxAmount;
-  const received       = Number(document.getElementById("amountReceived").value || 0);
+  const paymentMethod  = document.getElementById("paymentMethod").value;
+  const splitTotal = ["splitCash", "splitCard", "splitWallet"]
+    .reduce((sum, id) => sum + Number(document.getElementById(id)?.value || 0), 0);
+  const received = paymentMethod === "Split"
+    ? splitTotal
+    : Number(document.getElementById("amountReceived").value || 0);
   const change         = Math.max(received - total, 0);
   return { subtotal, discountAmount, taxAmount, total, received, change };
 }
@@ -136,7 +144,7 @@ function renderProducts() {
   productGrid.innerHTML = "";
   const term     = productSearch.value.trim().toLowerCase();
   const filtered = state.products.filter(p =>
-    !term || p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term)
+    !term || p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term) || (p.barcode || "").toLowerCase().includes(term)
   );
   if (filtered.length === 0) {
     productGrid.innerHTML = "<p style='color:var(--muted);padding:1rem'>No products found.</p>";
@@ -203,7 +211,9 @@ function renderHistory() {
       <td>${sale.items?.length || 0}</td>
       <td>${sale.paymentMethod || "-"}</td>
       <td>${money(sale.total)}</td>
+      <td><button class="btn ghost" type="button">Refund</button></td>
     `;
+    row.querySelector("button").addEventListener("click", () => alert("Refund/return request captured for " + sale.receiptNo));
     historyBody.appendChild(row);
   });
 }
@@ -258,6 +268,55 @@ function buildReceipt(sale, totals) {
     `Received: ${money(totals.received)}`,
     `Change:   ${money(totals.change)}`
   ].join("\n");
+}
+
+
+function saveHeldOrders() {
+  localStorage.setItem("novapos_held_orders", JSON.stringify(state.heldOrders));
+}
+
+function holdCurrentOrder() {
+  if (!state.cart.length) { alert("Cart is empty."); return; }
+  const held = {
+    id: crypto.randomUUID(),
+    cart: structuredClone(state.cart),
+    discount: document.getElementById("discount").value,
+    tax: document.getElementById("tax").value,
+    at: new Date().toISOString()
+  };
+  state.heldOrders.push(held);
+  saveHeldOrders();
+  resetSale();
+  alert("Order held successfully.");
+}
+
+function resumeHeldOrder() {
+  if (!state.heldOrders.length) { alert("No held orders."); return; }
+  const held = state.heldOrders.shift();
+  state.cart = held.cart || [];
+  document.getElementById("discount").value = held.discount || "0";
+  document.getElementById("tax").value = held.tax || "10";
+  saveHeldOrders();
+  renderCart();
+}
+
+function addBySkuOrBarcode(raw) {
+  const term = raw.trim().toLowerCase();
+  if (!term) return false;
+  const product = state.products.find(p => p.sku.toLowerCase() === term || (p.barcode || "").toLowerCase() === term || p.name.toLowerCase() === term);
+  if (!product) return false;
+  addToCart(product.id);
+  return true;
+}
+
+function downloadReceipt() {
+  const content = receiptContent.textContent || "";
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `receipt-${Date.now()}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 async function completeSale(event) {
@@ -332,11 +391,34 @@ function init() {
   document.getElementById("newSaleBtn").addEventListener("click", resetSale);
   document.getElementById("printReceiptBtn").addEventListener("click", () => window.print());
 
-  ["discount", "tax", "amountReceived"].forEach(id =>
-    document.getElementById(id).addEventListener("input", renderTotals)
+  ["discount", "tax", "amountReceived", "splitCash", "splitCard", "splitWallet"].forEach(id =>
+    document.getElementById(id)?.addEventListener("input", renderTotals)
   );
 
   productSearch.addEventListener("input", renderProducts);
+
+  barcodeInput.addEventListener("keydown", e => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const ok = addBySkuOrBarcode(barcodeInput.value);
+    if (!ok) alert("No product found for scanned barcode / SKU.");
+    barcodeInput.value = "";
+  });
+
+  document.getElementById("gstPreset").addEventListener("change", e => {
+    if (e.target.value) document.getElementById("tax").value = e.target.value;
+    renderTotals();
+  });
+
+  document.getElementById("paymentMethod").addEventListener("change", e => {
+    const split = e.target.value === "Split";
+    document.getElementById("splitPaymentFields").hidden = !split;
+    renderTotals();
+  });
+
+  document.getElementById("holdOrderBtn").addEventListener("click", holdCurrentOrder);
+  document.getElementById("resumeOrderBtn").addEventListener("click", resumeHeldOrder);
+  document.getElementById("downloadReceiptBtn").addEventListener("click", downloadReceipt);
 
   currencySelect.addEventListener("change", async e => {
     state.currency = e.target.value;

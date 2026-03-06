@@ -70,7 +70,12 @@
       <div class="panel products-panel">
         <div class="panel-header">
           <h3>Products</h3>
-          <input id="productSearch" type="search" placeholder="Search SKU or name" />
+          <input id="productSearch" type="search" placeholder="Fast search: name, SKU, barcode" />
+        </div>
+        <div class="quick-tools">
+          <input id="barcodeInput" type="text" placeholder="Scan barcode / enter SKU then press Enter" />
+          <button id="holdOrderBtn" class="btn ghost" type="button">Hold Order</button>
+          <button id="resumeOrderBtn" class="btn ghost" type="button">Resume Held</button>
         </div>
         <div id="productGrid" class="product-grid"></div>
 
@@ -114,6 +119,16 @@
             <input id="tax" type="number" min="0" max="100" value="10" />
           </label>
           <label class="field">
+            <span>GST Preset</span>
+            <select id="gstPreset">
+              <option value="">Custom</option>
+              <option value="5">GST 5%</option>
+              <option value="12">GST 12%</option>
+              <option value="18">GST 18%</option>
+              <option value="28">GST 28%</option>
+            </select>
+          </label>
+          <label class="field">
             <span>Payment Method</span>
             <select id="paymentMethod">
               <option value="Cash">Cash</option>
@@ -122,6 +137,11 @@
               <option value="Split">Split</option>
             </select>
           </label>
+          <div id="splitPaymentFields" class="split-payments" hidden>
+            <label class="field"><span>Cash</span><input id="splitCash" type="number" min="0" step="0.01" value="0" /></label>
+            <label class="field"><span>Card</span><input id="splitCard" type="number" min="0" step="0.01" value="0" /></label>
+            <label class="field"><span>Wallet</span><input id="splitWallet" type="number" min="0" step="0.01" value="0" /></label>
+          </div>
           <label class="field">
             <span>Amount Received</span>
             <input id="amountReceived" type="number" min="0" step="0.01" value="0" />
@@ -141,7 +161,10 @@
         <article class="receipt" id="receipt">
           <div class="panel-header">
             <h4>Receipt Preview</h4>
-            <button id="printReceiptBtn" class="btn" type="button">Print Receipt</button>
+            <div class="receipt-actions">
+              <button id="printReceiptBtn" class="btn" type="button">Print Receipt</button>
+              <button id="downloadReceiptBtn" class="btn ghost" type="button">Download Receipt</button>
+            </div>
           </div>
           <pre id="receiptContent">No completed sale yet.</pre>
         </article>
@@ -158,7 +181,7 @@
           <thead>
             <tr>
               <th>Receipt #</th><th>Time</th><th>Cashier</th>
-              <th>Items</th><th>Payment</th><th>Total</th>
+              <th>Items</th><th>Payment</th><th>Total</th><th>Actions</th>
             </tr>
           </thead>
           <tbody id="historyBody"></tbody>
