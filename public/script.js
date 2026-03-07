@@ -3,7 +3,7 @@ const state = {
   products: [], cart: [], history: [], categories: [],
   currentUser: null, currency: "USD", theme: "light",
   heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
-  customers: [], suppliers: [], reports: {}
+  customers: [], suppliers: [], reports: {}, taxCodes: []
 };
 
 const productGrid    = document.getElementById("productGrid");
@@ -117,10 +117,11 @@ async function loadBootstrap() {
   state.customers  = data.customers  || [];
   state.suppliers  = data.suppliers  || [];
   state.categories = data.categories || [];
+  state.taxCodes = data.taxCodes || [];
   state.reports    = data.reports    || {};
   currencySelect.value = state.currency;
   applyTheme();
-  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderCategoriesTable();
+  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderTaxCodeOptions(); renderCategoriesTable();
   await loadReports();
   if (state.currentUser?.role === "admin") await loadUsers();
 }
@@ -415,20 +416,34 @@ async function addProduct(event) {
   event.preventDefault();
   const catId   = document.getElementById("productCategory")?.value;
   const cat     = state.categories.find(c => String(c.id) === String(catId));
+  const taxCode = state.taxCodes.find(t => String(t.id) === String(document.getElementById("productTaxCode")?.value));
+  const gstRate = Number(taxCode?.gst_rate ?? ((cat && catId) ? cat.gst_rate : 0));
+  const cessRate = Number(taxCode?.cess_rate || 0);
+  const wholesalePrice = Number(document.getElementById("productWholesale")?.value || 0);
+  const retailPrice = +(wholesalePrice + (wholesalePrice * (gstRate + cessRate) / 100)).toFixed(2);
+  const mrp = Number(document.getElementById("productMrp")?.value || 0);
   const hsnCode = cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "";
-  const gstRate = (cat && catId) ? cat.gst_rate : Number(document.getElementById("productGst")?.value || 0);
+  if (retailPrice > mrp) { alert("Retail price cannot exceed MRP."); return; }
+  if (retailPrice < wholesalePrice) { alert("Retail price must be greater than or equal to wholesale price."); return; }
   try {
     await api("/api/products", { method:"POST", body: JSON.stringify({
       name:     document.getElementById("productName").value.trim(),
       sku:      document.getElementById("productSku").value.trim(),
-      price:    Number(document.getElementById("productPrice").value),
+      barcode:  document.getElementById("productSku").value.trim(),
+      wholesalePrice,
+      retailPrice,
+      mrp,
       stock:    Number(document.getElementById("productStock").value),
-      hsnCode, gstRate, categoryId: catId || null
+      hsnCode,
+      gstRate,
+      cessRate,
+      taxCode: taxCode?.id || null,
+      categoryId: catId || null
     })});
     event.target.reset();
     const hEl = document.getElementById("productHsn"); if(hEl){ hEl.value=""; hEl.readOnly=false; }
-    const gEl = document.getElementById("productGst"); if(gEl){ gEl.value="18"; gEl.readOnly=false; }
-    await loadBootstrap(); renderCategoryOptions(); renderCategoriesTable();
+    const gEl = document.getElementById("productGst"); if(gEl){ gEl.value="GST 18% + Cess 0%"; }
+    await loadBootstrap(); renderCategoryOptions(); renderTaxCodeOptions(); renderCategoriesTable();
   } catch(err){ alert(err.message); }
 }
 async function updatePrice(event) {
@@ -656,22 +671,24 @@ function renderInventoryTable() {
     : state.products;
   body.innerHTML = "";
   if (!list.length) {
-    body.innerHTML = "<tr><td colspan='5' style='color:var(--muted);text-align:center;padding:1rem'>No products</td></tr>";
+    body.innerHTML = "<tr><td colspan='8' style='color:var(--muted);text-align:center;padding:1rem'>No products</td></tr>";
     return;
   }
   list.forEach(p => {
     const low = p.stock <= 5;
     const tr = document.createElement("tr");
-    const gc = (p.gst_rate||0) >= 18 ? "var(--danger)" : (p.gst_rate||0) > 0 ? "var(--primary)" : "var(--success)";
+    const gstTotal = Number(p.gst_rate || 0) + Number(p.cess_rate || 0);
+    const gc = gstTotal >= 18 ? "var(--danger)" : gstTotal > 0 ? "var(--primary)" : "var(--success)";
     tr.innerHTML = `
       <td><strong>${p.name}</strong></td>
-      <td style="font-family:monospace;font-size:0.78rem;color:var(--muted)">${p.sku}</td>
       <td style="font-family:monospace;font-size:0.8rem">${p.hsn_code||"—"}</td>
-      <td><span style="background:${gc}20;color:${gc};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">${p.gst_rate||0}%</span></td>
-      <td id="pc-${p.id}">${money(p.price)}</td>
+      <td>${money(Number(p.wholesale_price ?? p.price ?? 0))}</td>
+      <td id="pc-${p.id}">${money(Number(p.retail_price ?? p.price ?? 0))}</td>
+      <td>${money(Number(p.mrp ?? p.retail_price ?? p.price ?? 0))}</td>
+      <td><span style="background:${gc}20;color:${gc};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">GST ${p.gst_rate||0}%${(p.cess_rate||0)>0 ? ` + Cess ${p.cess_rate}%` : ""}</span></td>
       <td style="font-weight:600;color:${low ? "var(--danger)" : "var(--text)"}">${p.stock}${low ? " ⚠️" : ""}</td>
       <td><button class="btn ghost" style="padding:0.2rem 0.45rem;font-size:0.74rem"
-          onclick="inlineEditPrice('${p.id}','${p.sku}',${p.price})">✏️</button></td>
+          onclick="inlineEditPrice('${p.id}','${p.sku}',${Number(p.retail_price ?? p.price ?? 0)})">✏️</button></td>
     `;
     body.appendChild(tr);
   });
@@ -766,13 +783,72 @@ function onCategoryChange() {
   const val = document.getElementById("productCategory")?.value;
   const cat = state.categories.find(c => String(c.id) === String(val));
   const hEl = document.getElementById("productHsn");
-  const gEl = document.getElementById("productGst");
+  const taxSel = document.getElementById("productTaxCode");
   if (cat) {
     if (hEl) { hEl.value = cat.hsn_code; hEl.readOnly = true; hEl.style.opacity = "0.6"; }
-    if (gEl) { gEl.value = cat.gst_rate; gEl.readOnly = true; gEl.style.opacity = "0.6"; }
+    if (taxSel) {
+      const match = (state.taxCodes || []).find(t => Number(t.gst_rate) === Number(cat.gst_rate) && Number(t.cess_rate || 0) === 0);
+      if (match) taxSel.value = String(match.id);
+    }
   } else {
     if (hEl) { hEl.value = ""; hEl.readOnly = false; hEl.style.opacity = "1"; }
-    if (gEl) { gEl.value = "18"; gEl.readOnly = false; gEl.style.opacity = "1"; }
+  }
+  syncTaxCodeDetails();
+}
+
+function renderTaxCodeOptions() {
+  const sel = document.getElementById("productTaxCode");
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = "";
+  const list = state.taxCodes?.length ? state.taxCodes : [
+    { id: "GST_5", name: "GST 5%", gst_rate: 5, cess_rate: 0 },
+    { id: "GST_12", name: "GST 12%", gst_rate: 12, cess_rate: 0 },
+    { id: "GST_18", name: "GST 18%", gst_rate: 18, cess_rate: 0 },
+    { id: "GST_28", name: "GST 28%", gst_rate: 28, cess_rate: 0 },
+    { id: "GST_28_CESS12", name: "GST 28% + Cess 12%", gst_rate: 28, cess_rate: 12 },
+  ];
+  list.forEach(t => {
+    const o = document.createElement("option");
+    o.value = t.id;
+    o.textContent = `${t.name} (GST ${t.gst_rate}% + Cess ${t.cess_rate||0}%)`;
+    sel.appendChild(o);
+  });
+  sel.value = current || (list.find(x => Number(x.gst_rate)===18 && Number(x.cess_rate||0)===0)?.id || list[0]?.id || "");
+  syncTaxCodeDetails();
+}
+
+function syncTaxCodeDetails() {
+  const selectedId = document.getElementById("productTaxCode")?.value;
+  const tax = (state.taxCodes || []).find(t => String(t.id) === String(selectedId));
+  const gst = Number(tax?.gst_rate || 0);
+  const cess = Number(tax?.cess_rate || 0);
+  const gstSel = document.getElementById("productGst");
+  if (gstSel) {
+    gstSel.innerHTML = `<option value="${gst}">GST ${gst}% + Cess ${cess}%</option>`;
+    gstSel.value = String(gst);
+  }
+  recalcRetailPreview();
+}
+
+function recalcRetailPreview() {
+  const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
+  const mrp = Number(document.getElementById("productMrp")?.value || 0);
+  const selectedId = document.getElementById("productTaxCode")?.value;
+  const tax = (state.taxCodes || []).find(t => String(t.id) === String(selectedId));
+  const gst = Number(tax?.gst_rate || 0);
+  const cess = Number(tax?.cess_rate || 0);
+  const taxTotal = gst + cess;
+  const retail = +(wholesale + (wholesale * taxTotal / 100)).toFixed(2);
+  const retailInput = document.getElementById("productRetail");
+  if (retailInput) retailInput.value = retail.toFixed(2);
+  const preview = document.getElementById("pricingPreview");
+  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + Tax ${taxTotal}% = ₹${retail.toFixed(2)}`;
+  const err = document.getElementById("pricingError");
+  if (err) {
+    if (mrp > 0 && retail > mrp) err.textContent = "Retail price cannot exceed MRP.";
+    else if (retail < wholesale) err.textContent = "Retail price must be greater than or equal to wholesale price.";
+    else err.textContent = "";
   }
 }
 
@@ -818,6 +894,9 @@ function init() {
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
   document.getElementById("checkoutForm")?.addEventListener("submit",completeSale);
   document.getElementById("productForm")?.addEventListener("submit",addProduct);
+  document.getElementById("productTaxCode")?.addEventListener("change", syncTaxCodeDetails);
+  document.getElementById("productWholesale")?.addEventListener("input", recalcRetailPreview);
+  document.getElementById("productMrp")?.addEventListener("input", recalcRetailPreview);
   document.getElementById("priceForm")?.addEventListener("submit",updatePrice);
   document.getElementById("clearHistoryBtn")?.addEventListener("click",clearHistory);
   document.getElementById("newSaleBtn")?.addEventListener("click",resetSale);

@@ -214,12 +214,14 @@
                 <div class="pane-card-title">➕ Add New Product</div>
                 <form id="productForm">
                   <div class="field"><span>Product Name</span><input id="productName" type="text" placeholder="e.g. Coca Cola 500ml" required /></div>
-                  <div class="field"><span>SKU / Barcode</span><input id="productSku" type="text" placeholder="e.g. SKU-001" required /></div>
-                  <div class="field"><span>Selling Price (excl. GST)</span><input id="productPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
-                  <div class="field"><span>Initial Stock</span><input id="productStock" type="number" min="0" step="1" placeholder="0" required /></div>
+                  <div class="field"><span>Barcode / SKU</span><input id="productSku" type="text" placeholder="e.g. SKU-001" required /></div>
                   <div class="field">
                     <span>Category <small style="color:var(--primary);font-weight:600">(auto-fills HSN &amp; GST ↓)</small></span>
                     <select id="productCategory"><option value="">— Select Category —</option></select>
+                  </div>
+                  <div class="field">
+                    <span>Tax Code (GST + Cess)</span>
+                    <select id="productTaxCode" required></select>
                   </div>
                   <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
                     <div class="field">
@@ -227,17 +229,23 @@
                       <input id="productHsn" type="text" placeholder="e.g. 1905" maxlength="8" />
                     </div>
                     <div class="field">
-                      <span>GST Rate</span>
-                      <select id="productGst">
-                        <option value="0">0% — Exempt</option>
-                        <option value="5">5%</option>
-                        <option value="12">12%</option>
-                        <option value="18" selected>18%</option>
-                        <option value="28">28%</option>
+                      <span>GST / Cess</span>
+                      <select id="productGst" disabled>
+                        <option value="18" selected>GST 18% + Cess 0%</option>
                       </select>
                     </div>
                   </div>
-                  <p style="font-size:0.74rem;color:var(--muted);margin:0.1rem 0 0.5rem">Select a category to auto-fill, or enter HSN &amp; GST manually.</p>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                    <div class="field"><span>Wholesale Price (Cost Price)</span><input id="productWholesale" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
+                    <div class="field"><span>Retail Price (Auto)</span><input id="productRetail" type="number" min="0" step="0.01" placeholder="0.00" readonly /></div>
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                    <div class="field"><span>MRP (Maximum Retail Price)</span><input id="productMrp" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
+                    <div class="field"><span>Initial Stock</span><input id="productStock" type="number" min="0" step="1" placeholder="0" required /></div>
+                  </div>
+                  <p id="pricingPreview" style="font-size:0.74rem;color:var(--muted);margin:0.1rem 0 0.25rem">Wholesale ₹0.00 + Tax 18% = ₹0.00</p>
+                  <p id="pricingError" style="font-size:0.74rem;color:var(--danger);min-height:1em"></p>
+                  <p style="font-size:0.74rem;color:var(--muted);margin:0.1rem 0 0.5rem">Retail price auto-calculates from Wholesale + (GST + Cess). Retail must be ≤ MRP.</p>
                   <button class="btn" type="submit" style="width:100%;margin-top:0.4rem">➕ Add Product</button>
                 </form>
               </div>
@@ -283,7 +291,7 @@
               </div>
               <div class="pane-table-wrap">
                 <table>
-                  <thead><tr><th>Name</th><th>SKU</th><th>HSN</th><th>GST</th><th>Price</th><th>Stock</th><th>Edit</th></tr></thead>
+                  <thead><tr><th>Product</th><th>HSN</th><th>Cost Price</th><th>Retail Price</th><th>MRP</th><th>GST</th><th>Stock</th><th>Edit</th></tr></thead>
                   <tbody id="inventoryTableBody"></tbody>
                 </table>
               </div>
