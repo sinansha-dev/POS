@@ -21,6 +21,14 @@ const JWT_SECRET   = process.env.JWT_SECRET || "CHANGE_THIS_SECRET";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
+const DEFAULT_TAX_CODES = [
+  { id: "GST_5", name: "GST 5%", gst_rate: 5, cess_rate: 0 },
+  { id: "GST_12", name: "GST 12%", gst_rate: 12, cess_rate: 0 },
+  { id: "GST_18", name: "GST 18%", gst_rate: 18, cess_rate: 0 },
+  { id: "GST_28", name: "GST 28%", gst_rate: 28, cess_rate: 0 },
+  { id: "GST_28_CESS12", name: "GST 28% + Cess 12%", gst_rate: 28, cess_rate: 12 },
+];
+
 if (JWT_SECRET === "CHANGE_THIS_SECRET") {
   console.warn("⚠️  WARNING: Set JWT_SECRET in your environment variables!");
 }
@@ -197,27 +205,108 @@ const DB = {
 
   async getProducts() {
     if (SUPABASE_URL) {
-      return await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock,hsn_code,gst_rate,category_id&order=name");
+      try {
+        return await sbQuery("products", "GET", null, "?select=id,name,sku,barcode,price,retail_price,wholesale_price,mrp,stock,hsn_code,gst_rate,cess_rate,tax_code,category_id&order=name");
+      } catch {
+        const rows = await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock,hsn_code,gst_rate,category_id&order=name");
+        return (rows || []).map((p) => ({
+          ...p,
+          barcode: p.sku,
+          retail_price: p.price,
+          wholesale_price: +((Number(p.price || 0)) / (1 + Number(p.gst_rate || 0) / 100)).toFixed(2),
+          mrp: p.price,
+          cess_rate: 0,
+          tax_code: null,
+        }));
+      }
     }
-    return getDb().prepare("SELECT id, name, sku, price, stock, hsn_code, gst_rate, category_id FROM products ORDER BY name").all();
+    return getDb().prepare("SELECT id, name, sku, barcode, price, retail_price, wholesale_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id FROM products ORDER BY name").all();
   },
 
-  async addProduct(id, name, sku, price, stock, hsnCode, gstRate, categoryId) {
+  async addProduct(id, payload) {
+    const {
+      name,
+      sku,
+      barcode,
+      wholesalePrice,
+      retailPrice,
+      mrp,
+      stock,
+      hsnCode,
+      gstRate,
+      cessRate,
+      taxCode,
+      categoryId,
+    } = payload;
     if (SUPABASE_URL) {
-      await sbQuery("products", "POST", { id, name, sku, price, stock,
-        hsn_code: hsnCode||null, gst_rate: Number(gstRate||0), category_id: categoryId||null });
+      const body = {
+        id,
+        name,
+        sku,
+        barcode,
+        price: retailPrice,
+        wholesale_price: wholesalePrice,
+        retail_price: retailPrice,
+        mrp,
+        stock,
+        hsn_code: hsnCode || null,
+        gst_rate: Number(gstRate || 0),
+        cess_rate: Number(cessRate || 0),
+        tax_code: taxCode || null,
+        category_id: categoryId || null,
+      };
+      try {
+        await sbQuery("products", "POST", body);
+      } catch {
+        await sbQuery("products", "POST", {
+          id,
+          name,
+          sku,
+          price: retailPrice,
+          stock,
+          hsn_code: hsnCode || null,
+          gst_rate: Number(gstRate || 0),
+          category_id: categoryId || null,
+        });
+      }
     } else {
-      getDb().prepare("INSERT INTO products (id, name, sku, price, stock, hsn_code, gst_rate, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(id, name, sku, price, stock, hsnCode||null, Number(gstRate||0), categoryId||null);
+      getDb().prepare("INSERT INTO products (id, name, sku, barcode, price, wholesale_price, retail_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          id,
+          name,
+          sku,
+          barcode,
+          retailPrice,
+          wholesalePrice,
+          retailPrice,
+          mrp,
+          stock,
+          hsnCode || null,
+          Number(gstRate || 0),
+          Number(cessRate || 0),
+          taxCode || null,
+          categoryId || null
+        );
     }
+  },
+
+  async getTaxCodes() {
+    if (SUPABASE_URL) {
+      try {
+        return await sbQuery("tax_codes", "GET", null, "?select=id,name,gst_rate,cess_rate&order=id");
+      } catch {
+        return DEFAULT_TAX_CODES;
+      }
+    }
+    return getDb().prepare("SELECT id, name, gst_rate, cess_rate FROM tax_codes ORDER BY id").all();
   },
 
   async updatePrice(sku, price) {
     if (SUPABASE_URL) {
-      const result = await sbQuery("products", "PATCH", { price }, `?sku=ilike.${encodeURIComponent(sku)}`);
+      const result = await sbQuery("products", "PATCH", { price, retail_price: price }, `?sku=ilike.${encodeURIComponent(sku)}`);
       return result?.length > 0 || true;
     }
-    const r = getDb().prepare("UPDATE products SET price=? WHERE lower(sku)=lower(?)").run(price, sku);
+    const r = getDb().prepare("UPDATE products SET price=?, retail_price=? WHERE lower(sku)=lower(?)").run(price, price, sku);
     return r.changes > 0;
   },
 
@@ -386,16 +475,23 @@ async function bootstrapPayload() {
     };
   }));
   const settings = await DB.getSettings();
+  const taxCodesRaw = await DB.getTaxCodes().catch(() => []);
+  const taxCodes = (taxCodesRaw || []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    gst_rate: Number(t.gst_rate || 0),
+    cess_rate: Number(t.cess_rate || 0),
+  }));
   // For Supabase: load extra features directly
   if (SUPABASE_URL) {
     const suppliersRaw = await sbQuery("suppliers","GET",null,"?select=id,name,phone,email&order=name").catch(()=>[]) || [];
     const customersRaw = await sbQuery("customers","GET",null,"?select=id,name,phone,loyalty_points,member_discount,credit_balance&order=name").catch(()=>[]) || [];
     const customers = customersRaw.map(c=>({ id:c.id, name:c.name, phone:c.phone, loyaltyPoints:c.loyalty_points, memberDiscount:c.member_discount, creditBalance:c.credit_balance }));
     const catsRaw = await sbQuery("categories","GET",null,"?select=id,name,hsn_code,gst_rate&order=name").catch(()=>[]) || [];
-    return { products, history, settings, suppliers: suppliersRaw, customers, categories: catsRaw, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
+    return { products, history, settings, taxCodes, suppliers: suppliersRaw, customers, categories: catsRaw, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
   }
   const sqliteCats = !SUPABASE_URL ? (getDb()?.prepare("SELECT id,name,hsn_code,gst_rate FROM categories ORDER BY name").all() || []) : [];
-  return { products, history, settings, categories: sqliteCats, ...sqliteFeatureData() };
+  return { products, history, settings, taxCodes, categories: sqliteCats, ...sqliteFeatureData() };
 }
 
 // ── API HANDLERS ─────────────────────────────────────────────
@@ -428,14 +524,48 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === "/api/products" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    const { name, sku, price, stock, hsnCode, gstRate, categoryId } = await parseBody(req);
-    if (!name || !sku || isNaN(Number(price)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
+    const body = await parseBody(req);
+    const {
+      name,
+      sku,
+      barcode,
+      wholesalePrice,
+      retailPrice,
+      mrp,
+      stock,
+      hsnCode,
+      gstRate,
+      categoryId,
+    } = body;
+    if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(retailPrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
+    const wholesale = Number(wholesalePrice);
+    const retail = Number(retailPrice);
+    const gst = Number(gstRate || 0);
+    if (retail > Number(mrp)) return json(res, 400, { error: "Retail price cannot exceed MRP." });
+    if (retail < wholesale) return json(res, 400, { error: "Retail price must be greater than or equal to wholesale price." });
     try {
-      await DB.addProduct(crypto.randomUUID(), name.trim(), sku.trim(), Number(price), Number(stock),
-        String(hsnCode||"").trim(), Number(gstRate||0), categoryId||null);
+      await DB.addProduct(crypto.randomUUID(), {
+        name: name.trim(),
+        sku: sku.trim(),
+        barcode: String(barcode || sku).trim(),
+        wholesalePrice: wholesale,
+        retailPrice: retail,
+        mrp: Number(mrp),
+        stock: Number(stock),
+        hsnCode: String(hsnCode || "").trim(),
+        gstRate: gst,
+        cessRate: 0,
+        taxCode: null,
+        categoryId: categoryId || null,
+      });
       return json(res, 200, { ok: true });
     } catch (e) { return json(res, 409, { error: "SKU already exists." }); }
+  }
+
+  if (pathname === "/api/tax-codes" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    return json(res, 200, { taxCodes: await DB.getTaxCodes() });
   }
 
   if (pathname.startsWith("/api/products/") && pathname.endsWith("/price") && req.method === "PATCH") {
@@ -917,7 +1047,8 @@ async function initSqlite() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
     CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, hsn_code TEXT NOT NULL, gst_rate REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0, category_id INTEGER);
+    CREATE TABLE IF NOT EXISTS tax_codes (id TEXT PRIMARY KEY, name TEXT NOT NULL, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, barcode TEXT UNIQUE, price REAL, wholesale_price REAL, retail_price REAL, mrp REAL, stock INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0, tax_code TEXT, category_id INTEGER);
     CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT);
     CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
@@ -927,6 +1058,18 @@ async function initSqlite() {
     CREATE TABLE IF NOT EXISTS stock_batches (id INTEGER PRIMARY KEY, sku TEXT, batch_no TEXT, expiry_date TEXT, qty INTEGER);
     CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT UNIQUE, loyalty_points INTEGER DEFAULT 0, member_discount REAL DEFAULT 0, credit_balance REAL DEFAULT 0);
   `);
+
+  const ensureCol = (sql) => { try { db.exec(sql); } catch {} };
+  ensureCol("ALTER TABLE products ADD COLUMN barcode TEXT");
+  ensureCol("ALTER TABLE products ADD COLUMN wholesale_price REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products ADD COLUMN retail_price REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products ADD COLUMN mrp REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products ADD COLUMN cess_rate REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products ADD COLUMN tax_code TEXT");
+
+  for (const t of DEFAULT_TAX_CODES) {
+    db.prepare("INSERT OR IGNORE INTO tax_codes (id, name, gst_rate, cess_rate) VALUES (?, ?, ?, ?)").run(t.id, t.name, t.gst_rate, t.cess_rate);
+  }
   const adminExists = db.prepare("SELECT id FROM users WHERE username='admin'").get();
   if (!adminExists) {
     db.prepare("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)").run("admin",   hashPassword("admin123"),  "admin");
@@ -945,15 +1088,19 @@ async function initSqlite() {
       [16,"Aerated Drinks","2202",28],
     ];
     CAT_DATA.forEach(([id,n,h,g]) => db.prepare("INSERT OR IGNORE INTO categories(id,name,hsn_code,gst_rate) VALUES(?,?,?,?)").run(id,n,h,g));
-    const ins = db.prepare("INSERT INTO products (id,name,sku,price,stock,hsn_code,gst_rate,category_id) VALUES(?,?,?,?,?,?,?,?)");
+    const ins = db.prepare("INSERT INTO products (id,name,sku,barcode,price,wholesale_price,retail_price,mrp,stock,hsn_code,gst_rate,cess_rate,tax_code,category_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     [
-      [crypto.randomUUID(),"Coffee 250g",  "CF-250",  8.50,42,"2101",18,12],
-      [crypto.randomUUID(),"Milk 1L",      "MLK-1L",  2.20,25,"0401", 5, 3],
-      [crypto.randomUUID(),"Bread Loaf",   "BR-LOAF", 1.80,14,"1905",18, 1],
-      [crypto.randomUUID(),"Chocolate Bar","CH-80",   1.25, 8,"1905",18, 1],
-      [crypto.randomUUID(),"Orange Juice", "OJ-1L",   3.90,12,"2202",18, 2],
+      [crypto.randomUUID(),"Coffee 250g",  "CF-250",  "CF-250",  8.50,7.20,8.50,10.00,42,"2101",18,0,"GST_18",12],
+      [crypto.randomUUID(),"Milk 1L",      "MLK-1L",  "MLK-1L",  2.20,2.10,2.20,2.50,25,"0401", 5,0,"GST_5",3],
+      [crypto.randomUUID(),"Bread Loaf",   "BR-LOAF", "BR-LOAF", 1.80,1.53,1.80,2.00,14,"1905",18,0,"GST_18",1],
+      [crypto.randomUUID(),"Chocolate Bar","CH-80",   "CH-80",   1.25,1.06,1.25,1.50, 8,"1905",18,0,"GST_18",1],
+      [crypto.randomUUID(),"Orange Juice", "OJ-1L",   "OJ-1L",   3.90,3.31,3.90,4.50,12,"2202",18,0,"GST_18",2],
     ].forEach((row) => ins.run(...row));
   }
+  db.exec("UPDATE products SET barcode = COALESCE(barcode, sku)");
+  db.exec("UPDATE products SET wholesale_price = COALESCE(wholesale_price, round(price / (1 + (COALESCE(gst_rate,0)+COALESCE(cess_rate,0))/100.0), 2))");
+  db.exec("UPDATE products SET retail_price = COALESCE(retail_price, price)");
+  db.exec("UPDATE products SET mrp = CASE WHEN COALESCE(mrp,0) <= 0 THEN retail_price ELSE mrp END");
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'light')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
@@ -993,6 +1140,15 @@ async function initSupabase() {
       ];
       for (const c of CATS) await sbQuery("categories","POST",c).catch(()=>{});
     }
+    // Seed tax codes (if table exists)
+    try {
+      const existingTax = await sbQuery("tax_codes", "GET", null, "?select=id&limit=1");
+      if (!existingTax || existingTax.length === 0) {
+        for (const t of DEFAULT_TAX_CODES) {
+          await sbQuery("tax_codes", "POST", t).catch(() => {});
+        }
+      }
+    } catch {}
     // Seed products
     const products = await sbQuery("products", "GET", null, "?select=id&limit=1");
     if (!products || products.length === 0) {
