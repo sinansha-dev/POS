@@ -11,12 +11,10 @@ const cartBody       = document.getElementById("cartBody");
 const historyBody    = document.getElementById("historyBody");
 const receiptContent = document.getElementById("receiptContent");
 const cashierNameInput = document.getElementById("cashierName");
-const inventoryAdmin = document.getElementById("inventoryAdmin");
 const currencySelect = document.getElementById("currencySelect");
 const darkModeBtn    = document.getElementById("darkModeBtn");
 const productSearch  = document.getElementById("productSearch");
 const barcodeInput   = document.getElementById("barcodeInput");
-const adminOpsPanel  = document.getElementById("adminOpsPanel");
 
 function saveToken(token, user) {
   sessionStorage.setItem("novapos_token", token);
@@ -53,16 +51,11 @@ function applySessionState() {
   const logged  = Boolean(state.currentUser);
   const isAdmin = state.currentUser?.role === "admin";
   document.body.classList.toggle("authenticated", logged);
-  if (inventoryAdmin) inventoryAdmin.hidden = !isAdmin;
-  // Admin dashboard is now a full-screen overlay — show/hide the button
+  // Show/hide Admin button in topbar
   const adminBtn = document.getElementById("adminDashBtn");
-  if (adminBtn) adminBtn.style.display = isAdmin ? "flex" : "none";
-  // If user logs out while dashboard is open, close it
-  if (!isAdmin && adminOpsPanel) {
-    adminOpsPanel.classList.remove("open");
-    adminOpsPanel.hidden = true;
-  }
-
+  if (adminBtn) adminBtn.style.display = isAdmin ? "inline-flex" : "none";
+  // If logged out while dashboard open, close it
+  if (!isAdmin) closeAdminDashboard();
   if (cashierNameInput) { cashierNameInput.value = state.currentUser?.username || ""; cashierNameInput.disabled = true; }
 }
 
@@ -112,7 +105,7 @@ async function loadBootstrap() {
   state.reports   = data.reports   || {};
   currencySelect.value = state.currency;
   applyTheme();
-  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable();
+  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList();
   await loadReports();
   if (state.currentUser?.role === "admin") await loadUsers();
 }
@@ -231,8 +224,11 @@ function renderReports() {
     `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${i+1}. ${p.name}</span><strong style="color:var(--success)">${p.qty} sold</strong></li>`);
 
   const slowEl = document.getElementById("slowMovingReport");
-  if (slowEl) slowEl.innerHTML = listHtml((r.slowMoving||[]).slice(0,8), p =>
-    `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${p.name}</span><small style="color:var(--danger)">${p.qty} sold</small></li>`);
+  if (slowEl) slowEl.innerHTML = listHtml((r.slowMoving||[]).slice(0,10), p =>
+    `<li style="display:flex;justify-content:space-between;padding:0.35rem 0;border-bottom:1px solid var(--border)">
+      <span><span style="font-size:0.83rem">${p.name}</span><br><small style="color:var(--muted);font-family:monospace">${p.sku||""}</small></span>
+      <span style="text-align:right;flex-shrink:0;margin-left:0.5rem"><strong style="color:var(--danger)">${p.qty} sold</strong><br><small style="color:var(--muted)">stock: ${p.stock}</small></span>
+    </li>`);
 
   const cashEl = document.getElementById("cashSummaryReport");
   if (cashEl) cashEl.innerHTML = listHtml(r.cashSummary, c =>
@@ -292,22 +288,6 @@ function renderCustomers() {
   });
 }
 
-
-function renderSuppliersTable() {
-  const body = document.getElementById("suppliersTableBody");
-  if (!body) return;
-  body.innerHTML = "";
-  if (!state.suppliers.length) {
-    body.innerHTML = "<tr><td colspan='4' style='color:var(--muted);text-align:center;padding:1rem'>No suppliers yet</td></tr>";
-    return;
-  }
-  state.suppliers.forEach(s => {
-    const row = document.createElement("tr");
-    row.innerHTML = `<td style="font-weight:600">${s.id || "—"}</td><td>${s.name}</td><td>${s.phone || "—"}</td><td>${s.email || "—"}</td>`;
-    body.appendChild(row);
-  });
-}
-
 function buildReceipt(sale, totals) {
   const sep = "================================"; const sep2 = "--------------------------------";
   return [sep,"         NovaPOS Receipt        ",sep,`Receipt: ${sale.receiptNo}`,`Time:    ${new Date(sale.timestamp).toLocaleString()}`,`Cashier: ${state.currentUser?.username||"-"}`,`Payment: ${document.getElementById("paymentMethod")?.value||"-"}`,sep2,...state.cart.map(i=>`${i.name.substring(0,18).padEnd(18)} x${String(i.qty).padStart(2)}  ${money(i.price*i.qty)}`),sep2,`Subtotal:  ${money(totals.subtotal)}`,`Discount:  -${money(totals.discountAmount)}`,`Tax:       ${money(totals.taxAmount)}`,"─────────────────────────────────",`TOTAL:     ${money(totals.total)}`,`Received:  ${money(totals.received)}`,`Change:    ${money(totals.change)}`,sep,"      Thank you! Come again!    ",sep].join("\n");
@@ -350,8 +330,7 @@ async function addSupplier(event) {
     event.target.reset();
     await loadBootstrap();
     renderSuppliersTable();
-  }
-  catch(err){alert(String(err.message).includes("SQLite")?"This feature works when running locally.":err.message);}
+  } catch(err) { alert(String(err.message).includes("SQLite")?"This feature works when running locally.":err.message); }
 }
 async function receivePO(event) {
   event.preventDefault();
@@ -459,62 +438,195 @@ async function resetUserPassword(username) {
 }
 
 
+// ══════════════════════════════════════════════════════════════
+// ADMIN DASHBOARD
+// ══════════════════════════════════════════════════════════════
 
-// ── ADMIN SIDEBAR TABS ─────────────────────────────────────────
 const TAB_LABELS = {
-  "suppliers": "Suppliers",
+  "inventory":       "Inventory",
+  "suppliers":       "Suppliers",
   "purchase-orders": "Purchase Orders",
-  "stock-transfer": "Stock Transfer",
-  "batches": "Batch / Expiry",
-  "customers": "Customers",
-  "reports": "Reports",
-  "users": "User Management"
+  "stock-transfer":  "Stock Transfer",
+  "batches":         "Batch / Expiry",
+  "customers":       "Customers",
+  "reports":         "Reports",
+  "users":           "User Management"
 };
 
 function openAdminDashboard() {
-  const panel = document.getElementById("adminOpsPanel");
-  if (!panel) return;
-  panel.hidden = false;
-  requestAnimationFrame(() => panel.classList.add("open"));
+  const el = document.getElementById("adminOverlay");
+  if (!el) return;
+  el.classList.add("open");
   document.body.style.overflow = "hidden";
+  renderInventoryTable();
+  renderSuppliersTable();
 }
 function closeAdminDashboard() {
-  const panel = document.getElementById("adminOpsPanel");
-  if (!panel) return;
-  panel.classList.remove("open");
+  const el = document.getElementById("adminOverlay");
+  if (!el) return;
+  el.classList.remove("open");
   document.body.style.overflow = "";
-  setTimeout(() => { if (!panel.classList.contains("open")) panel.hidden = true; }, 220);
 }
 
 function initAdminTabs() {
-  const tabs = document.querySelectorAll(".admin-tab");
-  tabs.forEach(tab => {
+  document.getElementById("adminDashBtn")?.addEventListener("click", openAdminDashboard);
+  document.getElementById("adminCloseBtn")?.addEventListener("click", closeAdminDashboard);
+  document.getElementById("adminCloseBtnTop")?.addEventListener("click", closeAdminDashboard);
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeAdminDashboard(); });
+
+  document.querySelectorAll(".admin-tab").forEach(tab => {
     tab.addEventListener("click", () => {
-      tabs.forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".admin-tab").forEach(t => t.classList.remove("active"));
       document.querySelectorAll(".admin-pane").forEach(p => p.classList.remove("active"));
       tab.classList.add("active");
       const key = tab.dataset.tab;
       const pane = document.getElementById("tab-" + key);
       if (pane) pane.classList.add("active");
-      // Update topbar title
       const label = TAB_LABELS[key] || key;
-      const titleEl = document.getElementById("adminPaneTitle");
-      const breadEl = document.getElementById("adminPaneBreadcrumb");
-      if (titleEl) titleEl.textContent = label;
-      if (breadEl) breadEl.textContent = label;
+      const t = document.getElementById("adminPaneTitle");
+      const b = document.getElementById("adminPaneBreadcrumb");
+      if (t) t.textContent = label;
+      if (b) b.textContent = label;
     });
   });
-  // Open button
-  document.getElementById("adminDashBtn")?.addEventListener("click", openAdminDashboard);
-  // Close buttons
-  document.getElementById("adminCloseBtn")?.addEventListener("click", closeAdminDashboard);
-  document.getElementById("adminCloseBtnTop")?.addEventListener("click", closeAdminDashboard);
-  // ESC key to close
-  document.addEventListener("keydown", e => { if (e.key === "Escape") closeAdminDashboard(); });
 }
 
+// ── SKU AUTOCOMPLETE ──────────────────────────────────────────
+function refreshSkuList() {
+  const dl = document.getElementById("skuList");
+  if (!dl) return;
+  dl.innerHTML = "";
+  state.products.forEach(p => {
+    // Option by SKU
+    const o1 = document.createElement("option");
+    o1.value = p.sku;
+    o1.label = p.name + " | " + money(p.price) + " | stock: " + p.stock;
+    dl.appendChild(o1);
+    // Option by name → auto-resolve to SKU on change
+    const o2 = document.createElement("option");
+    o2.value = p.name;
+    o2.label = "SKU: " + p.sku;
+    dl.appendChild(o2);
+  });
+  // Auto-resolve name → SKU and show current price hint
+  ["priceSku","adjustSku","poSku","transferSku","batchSku"].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el || el._skuListened) return;
+    el._skuListened = true;
+    el.addEventListener("change", () => {
+      const val = el.value.trim();
+      const match = state.products.find(p =>
+        p.name.toLowerCase() === val.toLowerCase() ||
+        p.sku.toLowerCase() === val.toLowerCase()
+      );
+      if (!match) return;
+      // For name input, swap to SKU
+      if (match.name.toLowerCase() === val.toLowerCase()) el.value = match.sku;
+      // Show current price hint on price form
+      if (id === "priceSku") {
+        const ni = document.getElementById("newPrice");
+        if (ni && !ni.value) { ni.value = match.price; ni.select(); }
+      }
+    });
+  });
+}
+
+// ── INVENTORY TABLE ───────────────────────────────────────────
+function renderInventoryTable() {
+  const body = document.getElementById("inventoryTableBody");
+  if (!body) return;
+  const term = (document.getElementById("inventorySearch")?.value || "").toLowerCase();
+  const list = term
+    ? state.products.filter(p => p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term))
+    : state.products;
+  body.innerHTML = "";
+  if (!list.length) {
+    body.innerHTML = "<tr><td colspan='5' style='color:var(--muted);text-align:center;padding:1rem'>No products</td></tr>";
+    return;
+  }
+  list.forEach(p => {
+    const low = p.stock <= 5;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>${p.name}</strong></td>
+      <td style="font-family:monospace;font-size:0.78rem;color:var(--muted)">${p.sku}</td>
+      <td id="pc-${p.id}">${money(p.price)}</td>
+      <td style="font-weight:600;color:${low ? "var(--danger)" : "var(--text)"}">${p.stock}${low ? " ⚠️" : ""}</td>
+      <td><button class="btn ghost" style="padding:0.2rem 0.45rem;font-size:0.74rem"
+          onclick="inlineEditPrice('${p.id}','${p.sku}',${p.price})">✏️</button></td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function inlineEditPrice(id, sku, cur) {
+  const cell = document.getElementById("pc-" + id);
+  if (!cell) return;
+  cell.innerHTML = `<div style="display:flex;gap:4px;align-items:center">
+    <input type="number" id="ip-${id}" value="${cur}" min="0" step="0.01"
+      style="width:74px;border:1px solid var(--primary);border-radius:5px;padding:2px 5px;font:inherit;font-size:0.8rem;background:var(--surface);color:var(--text)" />
+    <button class="btn" style="padding:2px 7px;font-size:0.74rem" onclick="submitInlinePrice('${id}','${sku}')">✓</button>
+    <button class="btn ghost" style="padding:2px 6px;font-size:0.74rem" onclick="renderInventoryTable()">✕</button>
+  </div>`;
+  document.getElementById("ip-" + id)?.focus();
+}
+
+async function submitInlinePrice(id, sku) {
+  const v = Number(document.getElementById("ip-" + id)?.value);
+  if (!v || v <= 0) { alert("Enter a valid price."); return; }
+  try {
+    await api(`/api/products/${encodeURIComponent(sku)}/price`, { method:"PATCH", body:JSON.stringify({ price:v }) });
+    await loadBootstrap();
+    renderInventoryTable();
+  } catch(e) { alert("❌ " + e.message); }
+}
+
+// ── STOCK ADJUSTMENT ──────────────────────────────────────────
+async function stockAdjust(event) {
+  event.preventDefault();
+  const raw   = document.getElementById("adjustSku").value.trim();
+  const type  = document.getElementById("adjustType").value;
+  const qty   = Number(document.getElementById("adjustQty").value);
+  const reason= document.getElementById("adjustReason")?.value || "";
+  const p = state.products.find(x =>
+    x.sku.toLowerCase() === raw.toLowerCase() || x.name.toLowerCase() === raw.toLowerCase()
+  );
+  if (!p) { alert("❌ Product not found. Check SKU or name."); return; }
+  const newStock = type === "set" ? qty : type === "add" ? p.stock + qty : Math.max(0, p.stock - qty);
+  if (!confirm(`Adjust "${p.name}"?
+
+Current stock: ${p.stock}
+New stock: ${newStock}
+Reason: ${reason||"—"}`)) return;
+  try {
+    await api(`/api/products/${encodeURIComponent(p.sku)}/stock`, {
+      method:"PATCH", body:JSON.stringify({ stock:newStock, reason })
+    });
+    event.target.reset();
+    await loadBootstrap();
+    renderInventoryTable();
+    alert(`✅ Stock updated! ${p.name}: ${p.stock} → ${newStock}`);
+  } catch(e) { alert("❌ " + e.message); }
+}
+
+// ── SUPPLIERS TABLE ───────────────────────────────────────────
+function renderSuppliersTable() {
+  const body = document.getElementById("suppliersTableBody");
+  if (!body) return;
+  body.innerHTML = "";
+  if (!state.suppliers.length) {
+    body.innerHTML = "<tr><td colspan='4' style='color:var(--muted);text-align:center;padding:1rem'>No suppliers yet</td></tr>";
+    return;
+  }
+  state.suppliers.forEach(s => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td style="font-weight:600">${s.id||"—"}</td><td>${s.name}</td><td>${s.phone||"—"}</td><td>${s.email||"—"}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+
 function init() {
-  initAdminTabs();
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
   document.getElementById("checkoutForm")?.addEventListener("submit",completeSale);
@@ -532,6 +644,9 @@ function init() {
   document.getElementById("batchForm")?.addEventListener("submit",addBatch);
   document.getElementById("customerForm")?.addEventListener("submit",addCustomer);
   document.getElementById("createUserForm")?.addEventListener("submit",createUser);
+  document.getElementById("stockAdjustForm")?.addEventListener("submit",stockAdjust);
+  document.getElementById("inventorySearch")?.addEventListener("input", renderInventoryTable);
+  initAdminTabs();
   barcodeInput?.addEventListener("keydown",handleBarcode);
   productSearch?.addEventListener("input",renderProducts);
   ["discount","tax","amountReceived","splitCash","splitCard","splitWallet"].forEach(id=>document.getElementById(id)?.addEventListener("input",renderTotals));

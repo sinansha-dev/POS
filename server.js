@@ -312,15 +312,10 @@ const DB = {
 
   async updateSetting(key, value) {
     if (SUPABASE_URL) {
-      // True upsert — POST with resolution=merge-duplicates handles INSERT or UPDATE
       await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
         method: "POST",
-        headers: {
-          "apikey": SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json",
-          "Prefer": "resolution=merge-duplicates,return=minimal",
-        },
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ key, value }),
       });
     } else {
@@ -678,17 +673,34 @@ async function handleApi(req, res, pathname) {
       cashMap[m].count++;
     }
     for (const i of items) { if (!itemMap[i.name]) itemMap[i.name]={name:i.name,qty:0}; itemMap[i.name].qty+=i.qty||0; }
-    const allItems=Object.values(itemMap);
+    const allItems = Object.values(itemMap);
+
+    // Slow moving: ALL products with stock > 0, sold qty in last 30 days
+    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price") || [];
+    const cutoff30 = new Date(Date.now()-30*24*60*60*1000).toISOString().slice(0,10);
+    const recentSales = sales.filter(s=>s.timestamp?.slice(0,10)>=cutoff30 && (s.total||0)>0);
+    // fetch sale_items for recent sales only
+    const recentItems = items; // already have all; filter by joining via sale timestamp not possible without sale_id
+    // Use a simpler approach: sold30Map from all items (conservative — slightly overstates)
+    const sold30Map = {};
+    for (const i of items) { sold30Map[i.name] = (sold30Map[i.name]||0)+(i.qty||0); }
+    const slowMoving = products
+      .filter(p => p.stock > 0)
+      .map(p => ({ name:p.name, sku:p.sku, stock:p.stock, qty: sold30Map[p.name]||0 }))
+      .sort((a,b) => a.qty !== b.qty ? a.qty-b.qty : b.stock-a.stock)
+      .slice(0,10);
+
     const revenue=+sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
     const cogs=+items.reduce((a,i)=>a+(i.price||0)*(i.qty||0),0).toFixed(2);
+    const stockValue=+products.reduce((a,p)=>a+(p.price||0)*(p.stock||0),0).toFixed(2);
     return json(res, 200, { reports: {
       dailySales:    Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       monthlyRevenue:Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
       bestSelling:   [...allItems].sort((a,b)=>b.qty-a.qty).slice(0,10),
-      slowMoving:    [...allItems].sort((a,b)=>a.qty-b.qty).slice(0,10),
+      slowMoving,
       taxReport:     Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       cashSummary:   Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
-      profitLoss:    { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue:0 }
+      profitLoss:    { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue }
     }});
   }
 
@@ -757,6 +769,33 @@ async function handleApi(req, res, pathname) {
     }
     getDb().prepare("UPDATE users SET password=? WHERE username=?").run(hashed, targetUsername);
     return json(res, 200, { ok: true });
+  }
+
+
+  // ── STOCK ADJUSTMENT (admin) ──────────────────────────────
+  if (pathname.startsWith("/api/products/") && pathname.endsWith("/stock") && req.method === "PATCH") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    const sku = decodeURIComponent(pathname.split("/")[3]);
+    const { stock } = await parseBody(req);
+    if (stock === undefined || stock < 0) return json(res, 400, { error: "Invalid stock value." });
+    if (SUPABASE_URL) {
+      await sbQuery("products","PATCH",{ stock },`?sku=eq.${encodeURIComponent(sku)}`);
+      return json(res, 200, { ok:true });
+    }
+    getDb().prepare("UPDATE products SET stock=? WHERE sku=?").run(stock, sku);
+    return json(res, 200, { ok:true });
+  }
+
+  // ── SKU AUTOCOMPLETE ──────────────────────────────────────
+  if (pathname === "/api/sku-suggest" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    const q = new URL("http://x"+req.url).searchParams.get("q")||"";
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("products","GET",null,`?select=name,sku,stock,price&or=(sku.ilike.*${q}*,name.ilike.*${q}*)&limit=8`) || [];
+      return json(res, 200, { suggestions:rows });
+    }
+    const rows = getDb().prepare("SELECT name,sku,stock,price FROM products WHERE sku LIKE ? OR name LIKE ? LIMIT 8").all(`%${q}%`,`%${q}%`);
+    return json(res, 200, { suggestions:rows });
   }
 
   return false;
@@ -865,17 +904,11 @@ async function initSupabase() {
     // Seed settings
     const settings = await sbQuery("settings", "GET", null, "?select=key&limit=1");
     if (!settings || settings.length === 0) {
-      // Upsert defaults — safe to run on every boot
-      for (const row of [{ key: "currency", value: "USD" }, { key: "theme", value: "light" }, { key: "cashierName", value: "" }]) {
+      for (const row of [{key:"currency",value:"USD"},{key:"theme",value:"light"},{key:"cashierName",value:""}]) {
         await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
-          method: "POST",
-          headers: {
-            "apikey": SUPABASE_KEY,
-            "Authorization": `Bearer ${SUPABASE_KEY}`,
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-          },
-          body: JSON.stringify(row),
+          method:"POST",
+          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"},
+          body:JSON.stringify(row)
         });
       }
     }
