@@ -530,33 +530,35 @@ async function handleApi(req, res, pathname) {
       sku,
       barcode,
       wholesalePrice,
-      retailPrice,
       mrp,
       stock,
       hsnCode,
       gstRate,
+      cessRate,
+      taxCode,
       categoryId,
     } = body;
-    if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(retailPrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
+    if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
     const wholesale = Number(wholesalePrice);
-    const retail = Number(retailPrice);
     const gst = Number(gstRate || 0);
-    if (retail > Number(mrp)) return json(res, 400, { error: "Retail price cannot exceed MRP." });
-    if (retail < wholesale) return json(res, 400, { error: "Retail price must be greater than or equal to wholesale price." });
+    const cess = Number(cessRate || 0);
+    const retailPrice = +(wholesale + (wholesale * (gst + cess) / 100)).toFixed(2);
+    if (retailPrice > Number(mrp)) return json(res, 400, { error: "Retail price cannot exceed MRP." });
+    if (retailPrice < wholesale) return json(res, 400, { error: "Retail price must be greater than or equal to wholesale price." });
     try {
       await DB.addProduct(crypto.randomUUID(), {
         name: name.trim(),
         sku: sku.trim(),
         barcode: String(barcode || sku).trim(),
         wholesalePrice: wholesale,
-        retailPrice: retail,
+        retailPrice,
         mrp: Number(mrp),
         stock: Number(stock),
         hsnCode: String(hsnCode || "").trim(),
         gstRate: gst,
-        cessRate: 0,
-        taxCode: null,
+        cessRate: cess,
+        taxCode: String(taxCode || "").trim() || null,
         categoryId: categoryId || null,
       });
       return json(res, 200, { ok: true });
