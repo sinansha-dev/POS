@@ -395,3 +395,172 @@ body.authenticated #loginOverlay {
   .user-mgmt-grid { grid-template-columns: 1fr; }
   .user-form-card[style*="span 2"] { grid-column: span 1; }
 }
+/* ══════════════════════════════════════════════════════════════
+   ADMIN DASHBOARD — tabbed sidebar layout
+   ══════════════════════════════════════════════════════════════ */
+
+.admin-dashboard {
+  padding: 0;
+  overflow: hidden;
+}
+
+.admin-dash-header {
+  padding: 1.1rem 1.4rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+.admin-dash-header h3 { font-size: 1.1rem; }
+.admin-dash-sub { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+
+.admin-dash-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  min-height: 500px;
+}
+
+/* ── SIDEBAR ── */
+.admin-sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--surface-soft);
+  display: flex;
+  flex-direction: column;
+  padding: 0.6rem 0;
+  gap: 2px;
+}
+
+.admin-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem 1rem;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  border-left: 3px solid transparent;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  border-radius: 0 6px 6px 0;
+  margin: 0 6px 0 0;
+}
+.admin-tab:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+.admin-tab.active {
+  background: var(--surface);
+  color: var(--primary);
+  border-left-color: var(--primary);
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+.tab-icon { font-size: 1rem; flex-shrink: 0; }
+.tab-label { white-space: nowrap; }
+
+/* ── CONTENT AREA ── */
+.admin-content { position: relative; overflow: hidden; }
+
+.admin-pane {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+}
+.admin-pane.active { display: flex; }
+
+.pane-header {
+  padding: 1.1rem 1.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.pane-header h4 { font-size: 1rem; font-weight: 600; }
+.pane-header p  { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+
+.pane-body {
+  padding: 1.2rem 1.4rem;
+  overflow-y: auto;
+  flex: 1;
+}
+.pane-body.two-col {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) 1fr;
+  gap: 1.2rem;
+  align-items: start;
+}
+
+/* ── FORM CARD ── */
+.pane-form-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.pane-form-card strong {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  margin-bottom: 0.1rem;
+}
+.pane-form-card .field input,
+.pane-form-card .field select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ── TABLE CARD ── */
+.pane-table-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.pane-table-card strong {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.pane-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.pane-table-wrap table { min-width: 100%; }
+.pane-table-wrap td,
+.pane-table-wrap th { font-size: 0.83rem; padding: 0.5rem 0.75rem; }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 900px) {
+  .admin-dash-layout { grid-template-columns: 1fr; }
+  .admin-sidebar {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0.5rem;
+    gap: 4px;
+  }
+  .admin-tab {
+    border-left: none;
+    border-bottom: 3px solid transparent;
+    border-radius: 6px 6px 0 0;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.78rem;
+    margin: 0;
+  }
+  .admin-tab.active { border-left: none; border-bottom-color: var(--primary); }
+  .pane-body.two-col { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .tab-label { display: none; }
+  .tab-icon { font-size: 1.2rem; }
+  .admin-tab { padding: 0.5rem; }
+}

@@ -55,8 +55,7 @@ function applySessionState() {
   document.body.classList.toggle("authenticated", logged);
   if (inventoryAdmin) inventoryAdmin.hidden = !isAdmin;
   if (adminOpsPanel)  adminOpsPanel.hidden  = !isAdmin;
-  const userMgmtPanel = document.getElementById("userMgmtPanel");
-  if (userMgmtPanel) userMgmtPanel.hidden = !isAdmin;
+
   if (cashierNameInput) { cashierNameInput.value = state.currentUser?.username || ""; cashierNameInput.disabled = true; }
 }
 
@@ -106,7 +105,7 @@ async function loadBootstrap() {
   state.reports   = data.reports   || {};
   currencySelect.value = state.currency;
   applyTheme();
-  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers();
+  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable();
   await loadReports();
   if (state.currentUser?.role === "admin") await loadUsers();
 }
@@ -286,6 +285,22 @@ function renderCustomers() {
   });
 }
 
+
+function renderSuppliersTable() {
+  const body = document.getElementById("suppliersTableBody");
+  if (!body) return;
+  body.innerHTML = "";
+  if (!state.suppliers.length) {
+    body.innerHTML = "<tr><td colspan='4' style='color:var(--muted);text-align:center;padding:1rem'>No suppliers yet</td></tr>";
+    return;
+  }
+  state.suppliers.forEach(s => {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td style="font-weight:600">${s.id || "—"}</td><td>${s.name}</td><td>${s.phone || "—"}</td><td>${s.email || "—"}</td>`;
+    body.appendChild(row);
+  });
+}
+
 function buildReceipt(sale, totals) {
   const sep = "================================"; const sep2 = "--------------------------------";
   return [sep,"         NovaPOS Receipt        ",sep,`Receipt: ${sale.receiptNo}`,`Time:    ${new Date(sale.timestamp).toLocaleString()}`,`Cashier: ${state.currentUser?.username||"-"}`,`Payment: ${document.getElementById("paymentMethod")?.value||"-"}`,sep2,...state.cart.map(i=>`${i.name.substring(0,18).padEnd(18)} x${String(i.qty).padStart(2)}  ${money(i.price*i.qty)}`),sep2,`Subtotal:  ${money(totals.subtotal)}`,`Discount:  -${money(totals.discountAmount)}`,`Tax:       ${money(totals.taxAmount)}`,"─────────────────────────────────",`TOTAL:     ${money(totals.total)}`,`Received:  ${money(totals.received)}`,`Change:    ${money(totals.change)}`,sep,"      Thank you! Come again!    ",sep].join("\n");
@@ -323,7 +338,12 @@ async function updatePrice(event) {
 
 async function addSupplier(event) {
   event.preventDefault();
-  try { await api("/api/suppliers",{method:"POST",body:JSON.stringify({name:document.getElementById("supplierName").value,phone:document.getElementById("supplierPhone").value,email:document.getElementById("supplierEmail").value})}); event.target.reset(); alert("✅ Supplier added!"); }
+  try {
+    await api("/api/suppliers",{method:"POST",body:JSON.stringify({name:document.getElementById("supplierName").value,phone:document.getElementById("supplierPhone").value,email:document.getElementById("supplierEmail").value})});
+    event.target.reset();
+    await loadBootstrap();
+    renderSuppliersTable();
+  }
   catch(err){alert(String(err.message).includes("SQLite")?"This feature works when running locally.":err.message);}
 }
 async function receivePO(event) {
@@ -432,7 +452,23 @@ async function resetUserPassword(username) {
 }
 
 
+
+// ── ADMIN SIDEBAR TABS ─────────────────────────────────────────
+function initAdminTabs() {
+  const tabs = document.querySelectorAll(".admin-tab");
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      tabs.forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".admin-pane").forEach(p => p.classList.remove("active"));
+      tab.classList.add("active");
+      const pane = document.getElementById("tab-" + tab.dataset.tab);
+      if (pane) pane.classList.add("active");
+    });
+  });
+}
+
 function init() {
+  initAdminTabs();
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
   document.getElementById("checkoutForm")?.addEventListener("submit",completeSale);
