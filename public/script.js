@@ -1,6 +1,6 @@
 // ── STATE ─────────────────────────────────────────────────────
 const state = {
-  products: [], cart: [], history: [],
+  products: [], cart: [], history: [], categories: [],
   currentUser: null, currency: "USD", theme: "light",
   heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
   customers: [], suppliers: [], reports: {}
@@ -62,23 +62,28 @@ function applySessionState() {
 function money(v) { return new Intl.NumberFormat("en-US", { style: "currency", currency: state.currency }).format(v || 0); }
 
 function saleTotals() {
-  const subtotal       = state.cart.reduce((s, i) => s + i.price * i.qty, 0);
-  const discountRate   = Number(document.getElementById("discount")?.value || 0) / 100;
-  const taxRate        = Number(document.getElementById("tax")?.value || 0) / 100;
-  const discountAmount = subtotal * discountRate;
-  const taxable        = Math.max(subtotal - discountAmount, 0);
-  const taxAmount      = taxable * taxRate;
-  const total          = taxable + taxAmount;
-  const pm             = document.getElementById("paymentMethod")?.value;
-  const splitTotal     = ["splitCash","splitCard","splitWallet"].reduce((s, id) => s + Number(document.getElementById(id)?.value || 0), 0);
+  const subtotal     = state.cart.reduce((s, i) => s + i.price * i.qty, 0);
+  const discountRate = Number(document.getElementById("discount")?.value || 0) / 100;
+  const discountAmt  = subtotal * discountRate;
+  // Per-item GST — each product carries its own rate (Indian GST rules)
+  const taxAmount = +state.cart.reduce((sum, i) => {
+    const lineVal  = i.price * i.qty;
+    const lineDisc = lineVal * discountRate;
+    return sum + (lineVal - lineDisc) * (i.gstRate || 0) / 100;
+  }, 0).toFixed(2);
+  const taxable = Math.max(subtotal - discountAmt, 0);
+  const total   = +(taxable + taxAmount).toFixed(2);
+  const pm      = document.getElementById("paymentMethod")?.value;
+  const splitTotal = ["splitCash","splitCard","splitWallet"].reduce((s, id) => s + Number(document.getElementById(id)?.value || 0), 0);
   const received = pm === "Split" ? splitTotal : Number(document.getElementById("amountReceived")?.value || 0);
-  return { subtotal, discountAmount, taxAmount, total, received, change: Math.max(received - total, 0) };
+  return { subtotal, discountAmount: discountAmt, taxAmount, total, received, change: Math.max(received - total, 0) };
 }
 function renderTotals() {
   const t = saleTotals();
   document.getElementById("subtotal").textContent      = money(t.subtotal);
   document.getElementById("discountValue").textContent = `-${money(t.discountAmount)}`;
-  document.getElementById("taxValue").textContent      = money(t.taxAmount);
+  document.getElementById("taxValue").textContent = money(t.taxAmount);
+  const gbEl = document.getElementById("gstBreakdown"); if(gbEl) gbEl.textContent = buildGstBreakdownLine();
   document.getElementById("grandTotal").textContent    = money(t.total);
   document.getElementById("changeDue").textContent     = money(t.change);
 }
@@ -100,12 +105,13 @@ async function loadBootstrap() {
   state.history   = data.history   || [];
   state.currency  = data.settings?.currency || "USD";
   state.theme     = data.settings?.theme    || "light";
-  state.customers = data.customers || [];
-  state.suppliers = data.suppliers || [];
-  state.reports   = data.reports   || {};
+  state.customers  = data.customers  || [];
+  state.suppliers  = data.suppliers  || [];
+  state.categories = data.categories || [];
+  state.reports    = data.reports    || {};
   currencySelect.value = state.currency;
   applyTheme();
-  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList();
+  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderCategoriesTable();
   await loadReports();
   if (state.currentUser?.role === "admin") await loadUsers();
 }
@@ -118,7 +124,9 @@ function renderProducts() {
   filtered.forEach(p => {
     const card = document.createElement("div");
     card.className = "product-card";
-    card.innerHTML = `<strong>${p.name}</strong><small>SKU: ${p.sku}</small><small>${money(p.price)}</small><small class="stock ${p.stock <= 5 ? "low" : ""}">Stock: ${p.stock}</small><button class="btn" ${p.stock <= 0 ? "disabled" : ""}>Add</button>`;
+    const hsnBadge = p.hsn_code ? `<small class="hsn-badge">HSN ${p.hsn_code}</small>` : '';
+    const gstBadge = `<small class="gst-badge ${(p.gst_rate||0)===0?'exempt':''}">GST ${p.gst_rate||0}%</small>`;
+    card.innerHTML = `<strong>${p.name}</strong><small>SKU: ${p.sku}</small><div style="display:flex;gap:4px;flex-wrap:wrap;margin:2px 0">${hsnBadge}${gstBadge}</div><small>${money(p.price)}</small><small class="stock ${p.stock <= 5 ? "low" : ""}">Stock: ${p.stock}</small><button class="btn" ${p.stock <= 0 ? "disabled" : ""}>Add</button>`;
     card.querySelector("button").onclick = () => addToCart(p.id);
     productGrid.appendChild(card);
   });
@@ -129,7 +137,7 @@ function addToCart(id) {
   if (!product || product.stock <= 0) return;
   const existing = state.cart.find(i => i.productId === id);
   if (existing) { if (existing.qty >= product.stock) { alert("Cannot exceed available stock."); return; } existing.qty++; }
-  else state.cart.push({ productId: id, name: product.name, price: product.price, qty: 1 });
+  else state.cart.push({ productId: id, name: product.name, price: product.price, qty: 1, hsnCode: product.hsn_code||null, gstRate: product.gst_rate||0 });
   renderCart();
 }
 function removeFromCart(productId) { state.cart = state.cart.filter(l => l.productId !== productId); renderCart(); }
@@ -137,7 +145,13 @@ function renderCart() {
   cartBody.innerHTML = "";
   state.cart.forEach(item => {
     const row = document.createElement("tr");
-    row.innerHTML = `<td>${item.name}</td><td><input type="number" min="1" value="${item.qty}" style="width:54px;border:1px solid var(--border);border-radius:6px;padding:2px 5px;background:var(--surface);color:var(--text)"/></td><td>${money(item.price)}</td><td>${money(item.price * item.qty)}</td><td><button class="btn danger" type="button" style="padding:0.2rem 0.5rem">×</button></td>`;
+    const lineGst = +(item.price * item.qty * (item.gstRate||0) / 100).toFixed(2);
+    row.innerHTML = `
+      <td>${item.name}${item.hsnCode ? `<br><small style="color:var(--muted);font-size:0.7rem;font-family:monospace">HSN: ${item.hsnCode}</small>` : ''}</td>
+      <td><input type="number" min="1" value="${item.qty}" style="width:54px;border:1px solid var(--border);border-radius:6px;padding:2px 5px;background:var(--surface);color:var(--text)"/></td>
+      <td>${money(item.price)}<br><small style="color:var(--muted);font-size:0.7rem">+${item.gstRate||0}% GST</small></td>
+      <td>${money(item.price * item.qty + lineGst)}<br><small style="color:var(--muted);font-size:0.7rem">tax: ${money(lineGst)}</small></td>
+      <td><button class="btn danger" type="button" style="padding:0.2rem 0.5rem">×</button></td>`;
     row.querySelector("input").addEventListener("change", e => {
       const v = parseInt(e.target.value); const p = state.products.find(x => x.id === item.productId);
       if (v < 1) { removeFromCart(item.productId); return; }
@@ -288,9 +302,82 @@ function renderCustomers() {
   });
 }
 
+function buildGstBreakdownLine() {
+  const byRate = {};
+  state.cart.forEach(i => { const r = i.gstRate||0; byRate[r] = (byRate[r]||0) + i.price * i.qty * r / 100; });
+  const parts = Object.entries(byRate).filter(([r]) => Number(r) > 0).map(([r,v]) => `GST@${r}%: ${money(+v.toFixed(2))}`);
+  return parts.length ? parts.join("  |  ") : "All items: 0% GST exempt";
+}
+
 function buildReceipt(sale, totals) {
-  const sep = "================================"; const sep2 = "--------------------------------";
-  return [sep,"         NovaPOS Receipt        ",sep,`Receipt: ${sale.receiptNo}`,`Time:    ${new Date(sale.timestamp).toLocaleString()}`,`Cashier: ${state.currentUser?.username||"-"}`,`Payment: ${document.getElementById("paymentMethod")?.value||"-"}`,sep2,...state.cart.map(i=>`${i.name.substring(0,18).padEnd(18)} x${String(i.qty).padStart(2)}  ${money(i.price*i.qty)}`),sep2,`Subtotal:  ${money(totals.subtotal)}`,`Discount:  -${money(totals.discountAmount)}`,`Tax:       ${money(totals.taxAmount)}`,"─────────────────────────────────",`TOTAL:     ${money(totals.total)}`,`Received:  ${money(totals.received)}`,`Change:    ${money(totals.change)}`,sep,"      Thank you! Come again!    ",sep].join("\n");
+  const W    = 50;
+  const LINE = "=".repeat(W);
+  const line2= "-".repeat(W);
+  const lpad = (s, n) => String(s).substring(0, n).padEnd(n);
+  const rpad = (s, n) => String(s).substring(0, n).padStart(n);
+
+  // Build GST groups for CGST/SGST breakup
+  const gstGroups = {};
+  state.cart.forEach(i => {
+    const r = i.gstRate||0; if (!r) return;
+    gstGroups[r] = (gstGroups[r]||0) + i.price * i.qty * r / 100;
+  });
+
+  const header = [
+    LINE,
+    "         NovaPOS — Tax Invoice         ".substring(0, W),
+    LINE,
+    `Receipt : ${sale.receiptNo}`,
+    `Date    : ${new Date(sale.timestamp).toLocaleString("en-IN")}`,
+    `Cashier : ${state.currentUser?.username||"-"}`,
+    `Payment : ${document.getElementById("paymentMethod")?.value||"-"}`,
+    line2,
+    lpad("Item", 20) + rpad("HSN", 7) + rpad("Qty", 4) + rpad("Rate", 8) + rpad("GST%", 5) + rpad("Total", 8),
+    line2,
+  ];
+
+  const itemLines = state.cart.map(i => {
+    const lineAmt = i.price * i.qty;
+    const lineGst = +(lineAmt * (i.gstRate||0) / 100).toFixed(2);
+    return lpad(i.name, 20)
+      + rpad(i.hsnCode||i.hsn_code||"—", 7)
+      + rpad(i.qty, 4)
+      + rpad(money(i.price), 8)
+      + rpad((i.gstRate||0)+"%", 5)
+      + rpad(money(lineAmt + lineGst), 8);
+  });
+
+  // GST Summary table
+  const gstRows = [line2, "  GST Breakup (Intrastate — CGST + SGST):"];
+  gstRows.push("  " + lpad("Rate", 6) + rpad("Taxable", 14) + rpad("CGST", 9) + rpad("SGST", 9) + rpad("Total GST", 11));
+  if (!Object.keys(gstGroups).length) {
+    gstRows.push("  All items exempt — 0% GST");
+  } else {
+    Object.entries(gstGroups).sort((a,b)=>Number(a[0])-Number(b[0])).forEach(([rate, gstAmt]) => {
+      const taxable = gstAmt * 100 / Number(rate);
+      gstRows.push("  " + lpad(rate+"%", 6)
+        + rpad(money(+taxable.toFixed(2)), 14)
+        + rpad(money(+(gstAmt/2).toFixed(2)), 9)
+        + rpad(money(+(gstAmt/2).toFixed(2)), 9)
+        + rpad(money(+gstAmt.toFixed(2)), 11));
+    });
+  }
+
+  const footer = [
+    line2,
+    `  Subtotal  : ${money(totals.subtotal)}`,
+    `  Discount  : -${money(totals.discountAmount)}`,
+    `  Total GST : ${money(totals.taxAmount)}`,
+    "  " + "─".repeat(W - 2),
+    `  TOTAL     : ${money(totals.total)}`,
+    `  Received  : ${money(totals.received)}`,
+    `  Change    : ${money(totals.change)}`,
+    LINE,
+    "       Thank you! Visit Again!        ".substring(0, W),
+    "       GSTIN: [Your GSTIN here]       ".substring(0, W),
+    LINE,
+  ];
+  return [...header, ...itemLines, ...gstRows, ...footer].join("\n");
 }
 
 function downloadReceipt() {
@@ -314,8 +401,23 @@ async function completeSale(event) {
 
 async function addProduct(event) {
   event.preventDefault();
-  try { await api("/api/products",{method:"POST",body:JSON.stringify({name:document.getElementById("productName").value.trim(),sku:document.getElementById("productSku").value.trim(),price:Number(document.getElementById("productPrice").value),stock:Number(document.getElementById("productStock").value)})}); event.target.reset(); await loadBootstrap(); }
-  catch(err){alert(err.message);}
+  const catId   = document.getElementById("productCategory")?.value;
+  const cat     = state.categories.find(c => String(c.id) === String(catId));
+  const hsnCode = cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "";
+  const gstRate = (cat && catId) ? cat.gst_rate : Number(document.getElementById("productGst")?.value || 0);
+  try {
+    await api("/api/products", { method:"POST", body: JSON.stringify({
+      name:     document.getElementById("productName").value.trim(),
+      sku:      document.getElementById("productSku").value.trim(),
+      price:    Number(document.getElementById("productPrice").value),
+      stock:    Number(document.getElementById("productStock").value),
+      hsnCode, gstRate, categoryId: catId || null
+    })});
+    event.target.reset();
+    const hEl = document.getElementById("productHsn"); if(hEl){ hEl.value=""; hEl.readOnly=false; }
+    const gEl = document.getElementById("productGst"); if(gEl){ gEl.value="18"; gEl.readOnly=false; }
+    await loadBootstrap(); renderCategoryOptions(); renderCategoriesTable();
+  } catch(err){ alert(err.message); }
 }
 async function updatePrice(event) {
   event.preventDefault();
@@ -450,6 +552,7 @@ const TAB_LABELS = {
   "batches":         "Batch / Expiry",
   "customers":       "Customers",
   "reports":         "Reports",
+  "gst-categories":  "GST Categories",
   "users":           "User Management"
 };
 
@@ -547,9 +650,12 @@ function renderInventoryTable() {
   list.forEach(p => {
     const low = p.stock <= 5;
     const tr = document.createElement("tr");
+    const gc = (p.gst_rate||0) >= 18 ? "var(--danger)" : (p.gst_rate||0) > 0 ? "var(--primary)" : "var(--success)";
     tr.innerHTML = `
       <td><strong>${p.name}</strong></td>
       <td style="font-family:monospace;font-size:0.78rem;color:var(--muted)">${p.sku}</td>
+      <td style="font-family:monospace;font-size:0.8rem">${p.hsn_code||"—"}</td>
+      <td><span style="background:${gc}20;color:${gc};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">${p.gst_rate||0}%</span></td>
       <td id="pc-${p.id}">${money(p.price)}</td>
       <td style="font-weight:600;color:${low ? "var(--danger)" : "var(--text)"}">${p.stock}${low ? " ⚠️" : ""}</td>
       <td><button class="btn ghost" style="padding:0.2rem 0.45rem;font-size:0.74rem"
@@ -626,6 +732,75 @@ function renderSuppliersTable() {
 }
 
 
+// ══════════════════════════════════════════════════════════════
+// HSN / GST CATEGORIES
+// ══════════════════════════════════════════════════════════════
+
+function renderCategoryOptions() {
+  const sel = document.getElementById("productCategory");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— Select Category (auto-fills HSN &amp; GST) —</option>';
+  state.categories.forEach(c => {
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = `${c.name}  ·  HSN: ${c.hsn_code}  ·  GST: ${c.gst_rate}%`;
+    sel.appendChild(o);
+  });
+  if (cur) sel.value = cur;
+}
+
+function onCategoryChange() {
+  const val = document.getElementById("productCategory")?.value;
+  const cat = state.categories.find(c => String(c.id) === String(val));
+  const hEl = document.getElementById("productHsn");
+  const gEl = document.getElementById("productGst");
+  if (cat) {
+    if (hEl) { hEl.value = cat.hsn_code; hEl.readOnly = true; hEl.style.opacity = "0.6"; }
+    if (gEl) { gEl.value = cat.gst_rate; gEl.readOnly = true; gEl.style.opacity = "0.6"; }
+  } else {
+    if (hEl) { hEl.value = ""; hEl.readOnly = false; hEl.style.opacity = "1"; }
+    if (gEl) { gEl.value = "18"; gEl.readOnly = false; gEl.style.opacity = "1"; }
+  }
+}
+
+function renderCategoriesTable() {
+  const body = document.getElementById("categoriesTableBody");
+  if (!body) return;
+  body.innerHTML = "";
+  if (!state.categories.length) {
+    body.innerHTML = "<tr><td colspan='4' style='color:var(--muted);text-align:center;padding:1rem'>No categories yet. Add one above.</td></tr>";
+    return;
+  }
+  state.categories.forEach(c => {
+    const gc = c.gst_rate === 0 ? "var(--success)" : c.gst_rate <= 12 ? "var(--primary)" : "var(--danger)";
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>${c.name}</strong></td>
+      <td style="font-family:monospace;font-weight:600;font-size:0.85rem">${c.hsn_code}</td>
+      <td><span style="background:${gc}20;color:${gc};padding:2px 10px;border-radius:999px;font-weight:700;font-size:0.78rem">${c.gst_rate}%</span></td>
+      <td style="font-size:0.75rem;color:var(--muted)">${c.gst_rate > 0 ? `CGST ${c.gst_rate/2}% + SGST ${c.gst_rate/2}%` : "Exempt (0%)"}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function addCategory(event) {
+  event.preventDefault();
+  const name    = document.getElementById("catName")?.value?.trim();
+  const hsnCode = document.getElementById("catHsn")?.value?.trim();
+  const gstRate = Number(document.getElementById("catGst")?.value);
+  if (!name || !hsnCode) { alert("Category name and HSN code are required."); return; }
+  if (![0,3,5,12,18,28].includes(gstRate)) { alert("GST rate must be 0, 3, 5, 12, 18 or 28."); return; }
+  try {
+    await api("/api/categories", { method:"POST", body:JSON.stringify({ name, hsnCode, gstRate }) });
+    event.target.reset();
+    await loadBootstrap();
+    renderCategoryOptions(); renderCategoriesTable();
+    alert(`✅ Category "${name}" added!\nHSN: ${hsnCode} | GST: ${gstRate}%`);
+  } catch(err) { alert("❌ " + err.message); }
+}
+
+
 function init() {
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
@@ -645,6 +820,8 @@ function init() {
   document.getElementById("customerForm")?.addEventListener("submit",addCustomer);
   document.getElementById("createUserForm")?.addEventListener("submit",createUser);
   document.getElementById("stockAdjustForm")?.addEventListener("submit",stockAdjust);
+  document.getElementById("categoryForm")?.addEventListener("submit",addCategory);
+  document.getElementById("productCategory")?.addEventListener("change",onCategoryChange);
   document.getElementById("inventorySearch")?.addEventListener("input", renderInventoryTable);
   initAdminTabs();
   barcodeInput?.addEventListener("keydown",handleBarcode);

@@ -197,16 +197,18 @@ const DB = {
 
   async getProducts() {
     if (SUPABASE_URL) {
-      return await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock&order=name");
+      return await sbQuery("products", "GET", null, "?select=id,name,sku,price,stock,hsn_code,gst_rate,category_id&order=name");
     }
-    return getDb().prepare("SELECT id, name, sku, price, stock FROM products ORDER BY name").all();
+    return getDb().prepare("SELECT id, name, sku, price, stock, hsn_code, gst_rate, category_id FROM products ORDER BY name").all();
   },
 
-  async addProduct(id, name, sku, price, stock) {
+  async addProduct(id, name, sku, price, stock, hsnCode, gstRate, categoryId) {
     if (SUPABASE_URL) {
-      await sbQuery("products", "POST", { id, name, sku, price, stock });
+      await sbQuery("products", "POST", { id, name, sku, price, stock,
+        hsn_code: hsnCode||null, gst_rate: Number(gstRate||0), category_id: categoryId||null });
     } else {
-      getDb().prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)").run(id, name, sku, price, stock);
+      getDb().prepare("INSERT INTO products (id, name, sku, price, stock, hsn_code, gst_rate, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(id, name, sku, price, stock, hsnCode||null, Number(gstRate||0), categoryId||null);
     }
   },
 
@@ -270,8 +272,8 @@ const DB = {
     if (SUPABASE_URL) {
       await sbQuery("sale_items", "POST", item);
     } else {
-      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty) VALUES (?, ?, ?, ?, ?)")
-        .run(item.sale_id, item.product_id, item.name, item.price, item.qty);
+      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty, hsn_code, gst_rate) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(item.sale_id, item.product_id, item.name, item.price, item.qty, item.hsn_code||null, item.gst_rate||0);
     }
   },
 
@@ -285,9 +287,9 @@ const DB = {
   async getSaleItems(saleId) {
     if (SUPABASE_URL) {
       return await sbQuery("sale_items", "GET", null,
-        `?sale_id=eq.${saleId}&select=product_id,name,price,qty`);
+        `?sale_id=eq.${saleId}&select=product_id,name,price,qty,hsn_code,gst_rate`);
     }
-    return getDb().prepare("SELECT product_id as productId, name, price, qty FROM sale_items WHERE sale_id=?").all(saleId);
+    return getDb().prepare("SELECT product_id as productId, name, price, qty, hsn_code, gst_rate FROM sale_items WHERE sale_id=?").all(saleId);
   },
 
   async clearHistory() {
@@ -379,7 +381,7 @@ async function bootstrapPayload() {
       change:        s.change_amount,
       currency:      s.currency,
       items: SUPABASE_URL
-        ? items.map(i => ({ productId: i.product_id, name: i.name, price: i.price, qty: i.qty }))
+        ? items.map(i => ({ productId: i.product_id, name: i.name, price: i.price, qty: i.qty, hsnCode: i.hsn_code||null, gstRate: i.gst_rate||0 }))
         : items,
     };
   }));
@@ -389,9 +391,11 @@ async function bootstrapPayload() {
     const suppliersRaw = await sbQuery("suppliers","GET",null,"?select=id,name,phone,email&order=name").catch(()=>[]) || [];
     const customersRaw = await sbQuery("customers","GET",null,"?select=id,name,phone,loyalty_points,member_discount,credit_balance&order=name").catch(()=>[]) || [];
     const customers = customersRaw.map(c=>({ id:c.id, name:c.name, phone:c.phone, loyaltyPoints:c.loyalty_points, memberDiscount:c.member_discount, creditBalance:c.credit_balance }));
-    return { products, history, settings, suppliers: suppliersRaw, customers, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
+    const catsRaw = await sbQuery("categories","GET",null,"?select=id,name,hsn_code,gst_rate&order=name").catch(()=>[]) || [];
+    return { products, history, settings, suppliers: suppliersRaw, customers, categories: catsRaw, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
   }
-  return { products, history, settings, ...sqliteFeatureData() };
+  const sqliteCats = !SUPABASE_URL ? (getDb()?.prepare("SELECT id,name,hsn_code,gst_rate FROM categories ORDER BY name").all() || []) : [];
+  return { products, history, settings, categories: sqliteCats, ...sqliteFeatureData() };
 }
 
 // ── API HANDLERS ─────────────────────────────────────────────
@@ -424,13 +428,14 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === "/api/products" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    const { name, sku, price, stock } = await parseBody(req);
+    const { name, sku, price, stock, hsnCode, gstRate, categoryId } = await parseBody(req);
     if (!name || !sku || isNaN(Number(price)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
     try {
-      await DB.addProduct(crypto.randomUUID(), name.trim(), sku.trim(), Number(price), Number(stock));
+      await DB.addProduct(crypto.randomUUID(), name.trim(), sku.trim(), Number(price), Number(stock),
+        String(hsnCode||"").trim(), Number(gstRate||0), categoryId||null);
       return json(res, 200, { ok: true });
-    } catch { return json(res, 409, { error: "SKU already exists." }); }
+    } catch (e) { return json(res, 409, { error: "SKU already exists." }); }
   }
 
   if (pathname.startsWith("/api/products/") && pathname.endsWith("/price") && req.method === "PATCH") {
@@ -479,7 +484,8 @@ async function handleApi(req, res, pathname) {
     });
 
     for (const line of sale.items) {
-      await DB.insertSaleItem({ sale_id: saleId, product_id: line.productId, name: line.name, price: line.price, qty: line.qty });
+      await DB.insertSaleItem({ sale_id: saleId, product_id: line.productId, name: line.name,
+        price: line.price, qty: line.qty, hsn_code: line.hsnCode||null, gst_rate: line.gstRate||0 });
     }
 
     return json(res, 200, { ok: true, receiptNo, timestamp });
@@ -653,8 +659,13 @@ async function handleApi(req, res, pathname) {
     if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
     if (!SUPABASE_URL) return json(res, 200, { reports: sqliteFeatureData().reports });
 
-    const sales = await sbQuery("sales","GET",null,"?select=timestamp,total,tax,payment_method,subtotal&order=timestamp.desc") || [];
-    const items = await sbQuery("sale_items","GET",null,"?select=name,qty,price") || [];
+    const sales    = await sbQuery("sales","GET",null,"?select=timestamp,total,tax,payment_method,subtotal&order=timestamp.desc") || [];
+    const items    = await sbQuery("sale_items","GET",null,"?select=name,qty,price,product_id") || [];
+    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price") || [];
+
+    // 30-day cutoff for slow moving calculation
+    const cutoff30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
+
     const dailyMap={}, monthMap={}, taxMap={}, cashMap={}, itemMap={};
     for (const s of sales) {
       if ((s.total||0) < 0) continue;
@@ -672,23 +683,54 @@ async function handleApi(req, res, pathname) {
       cashMap[m].amount          =+((cashMap[m].amount||0)      +(s.total||0)).toFixed(2);
       cashMap[m].count++;
     }
-    for (const i of items) { if (!itemMap[i.name]) itemMap[i.name]={name:i.name,qty:0}; itemMap[i.name].qty+=i.qty||0; }
+
+    // Best selling: ALL time, group by product name
+    for (const i of items) {
+      if (!itemMap[i.name]) itemMap[i.name]={name:i.name, qty:0};
+      itemMap[i.name].qty += i.qty||0;
+    }
     const allItems = Object.values(itemMap);
 
-    // Slow moving: ALL products with stock > 0, sold qty in last 30 days
-    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price") || [];
-    const cutoff30 = new Date(Date.now()-30*24*60*60*1000).toISOString().slice(0,10);
-    const recentSales = sales.filter(s=>s.timestamp?.slice(0,10)>=cutoff30 && (s.total||0)>0);
-    // fetch sale_items for recent sales only
-    const recentItems = items; // already have all; filter by joining via sale timestamp not possible without sale_id
-    // Use a simpler approach: sold30Map from all items (conservative — slightly overstates)
+    // Slow moving (proper POS logic):
+    // - Start with ALL products in inventory (including zero-sale products)
+    // - Count qty sold in last 30 days only
+    // - Sort: zero-sale products first, then least sold, then by stock DESC (most stock = most urgent)
+    // - Only show products with stock > 0 (no point showing out-of-stock as "slow moving")
+    const soldLast30 = {};
+    for (const i of items) {
+      // We need sale timestamp — use sale_items joined approach via sales map
+      soldLast30[i.name] = (soldLast30[i.name]||0); // init
+    }
+    // Build sale timestamp map for last-30 filter
+    const recentSaleIds = new Set(
+      sales.filter(s => s.timestamp?.slice(0,10) >= cutoff30 && (s.total||0) > 0)
+           .map((_,idx) => idx) // we don't have sale_id in this query, use name-based approach
+    );
+    // Simpler: re-scan items but filter via sale dates using a joined query isn't available
+    // Use all-time qty but note in label — still correct vs current broken logic
     const sold30Map = {};
-    for (const i of items) { sold30Map[i.name] = (sold30Map[i.name]||0)+(i.qty||0); }
+    // Since sale_items doesn't have timestamp, use sales fetched and match via a second item fetch with sale join
+    const recentItems = await sbQuery("sale_items","GET",null,
+      `?select=name,qty,sales(timestamp)&sales.timestamp=gte.${cutoff30}T00:00:00`) || [];
+    for (const i of recentItems) {
+      const ts = i.sales?.timestamp;
+      if (!ts || ts.slice(0,10) < cutoff30) continue;
+      sold30Map[i.name] = (sold30Map[i.name]||0) + (i.qty||0);
+    }
+
     const slowMoving = products
-      .filter(p => p.stock > 0)
-      .map(p => ({ name:p.name, sku:p.sku, stock:p.stock, qty: sold30Map[p.name]||0 }))
-      .sort((a,b) => a.qty !== b.qty ? a.qty-b.qty : b.stock-a.stock)
-      .slice(0,10);
+      .filter(p => p.stock > 0)  // only in-stock items
+      .map(p => ({
+        name:  p.name,
+        sku:   p.sku,
+        stock: p.stock,
+        qty:   sold30Map[p.name] || 0,  // sold in last 30 days (0 if never sold)
+      }))
+      .sort((a,b) => {
+        if (a.qty !== b.qty) return a.qty - b.qty;   // least sold first
+        return b.stock - a.stock;                     // tie-break: most stock = most urgent
+      })
+      .slice(0, 10);
 
     const revenue=+sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
     const cogs=+items.reduce((a,i)=>a+(i.price||0)*(i.qty||0),0).toFixed(2);
@@ -772,30 +814,66 @@ async function handleApi(req, res, pathname) {
   }
 
 
-  // ── STOCK ADJUSTMENT (admin) ──────────────────────────────
+  // ── SKU SUGGESTIONS (autocomplete) ───────────────────────────
+  if (pathname === "/api/sku-suggest" && req.method === "GET") {
+    if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
+    const q = new URL("http://x" + req.url).searchParams.get("q") || "";
+    if (SUPABASE_URL) {
+      const rows = await sbQuery("products","GET",null,
+        `?select=name,sku,stock,price&or=(sku.ilike.*${q}*,name.ilike.*${q}*)&limit=8`) || [];
+      return json(res, 200, { suggestions: rows });
+    }
+    const rows = getDb().prepare(
+      "SELECT name, sku, stock, price FROM products WHERE sku LIKE ? OR name LIKE ? LIMIT 8"
+    ).all(`%${q}%`, `%${q}%`);
+    return json(res, 200, { suggestions: rows });
+  }
+
+
+  // ── STOCK ADJUSTMENT (admin only) ────────────────────────────
   if (pathname.startsWith("/api/products/") && pathname.endsWith("/stock") && req.method === "PATCH") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const sku = decodeURIComponent(pathname.split("/")[3]);
-    const { stock } = await parseBody(req);
+    const { stock, reason } = await parseBody(req);
     if (stock === undefined || stock < 0) return json(res, 400, { error: "Invalid stock value." });
     if (SUPABASE_URL) {
-      await sbQuery("products","PATCH",{ stock },`?sku=eq.${encodeURIComponent(sku)}`);
-      return json(res, 200, { ok:true });
+      await sbQuery("products", "PATCH", { stock }, `?sku=eq.${encodeURIComponent(sku)}`);
+      return json(res, 200, { ok: true });
     }
     getDb().prepare("UPDATE products SET stock=? WHERE sku=?").run(stock, sku);
-    return json(res, 200, { ok:true });
+    return json(res, 200, { ok: true });
   }
 
-  // ── SKU AUTOCOMPLETE ──────────────────────────────────────
-  if (pathname === "/api/sku-suggest" && req.method === "GET") {
+
+  // ── GET /api/categories ────────────────────────────────────────
+  if (pathname === "/api/categories" && req.method === "GET") {
     if (!requireAuth(req)) return json(res, 401, { error: "Login required." });
-    const q = new URL("http://x"+req.url).searchParams.get("q")||"";
     if (SUPABASE_URL) {
-      const rows = await sbQuery("products","GET",null,`?select=name,sku,stock,price&or=(sku.ilike.*${q}*,name.ilike.*${q}*)&limit=8`) || [];
-      return json(res, 200, { suggestions:rows });
+      const cats = await sbQuery("categories","GET",null,"?select=id,name,hsn_code,gst_rate&order=name") || [];
+      return json(res, 200, { categories: cats });
     }
-    const rows = getDb().prepare("SELECT name,sku,stock,price FROM products WHERE sku LIKE ? OR name LIKE ? LIMIT 8").all(`%${q}%`,`%${q}%`);
-    return json(res, 200, { suggestions:rows });
+    return json(res, 200, { categories: getDb().prepare("SELECT id,name,hsn_code,gst_rate FROM categories ORDER BY name").all() });
+  }
+
+  // ── POST /api/categories ───────────────────────────────────────
+  if (pathname === "/api/categories" && req.method === "POST") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    const { name, hsnCode, gstRate } = await parseBody(req);
+    if (!name || !hsnCode) return json(res, 400, { error: "Name and HSN code required." });
+    if (![0,3,5,12,18,28].includes(Number(gstRate))) return json(res, 400, { error: "GST rate must be 0, 3, 5, 12, 18 or 28." });
+    if (SUPABASE_URL) {
+      try {
+        const rows = await sbQuery("categories","POST",{ name:name.trim(), hsn_code:hsnCode.trim(), gst_rate:Number(gstRate) });
+        return json(res, 200, { ok:true, category:rows?.[0] });
+      } catch(e) {
+        if (e.message.includes("duplicate")||e.message.includes("unique")) return json(res, 409, { error:"Category already exists." });
+        throw e;
+      }
+    }
+    try {
+      const info = getDb().prepare("INSERT INTO categories(name,hsn_code,gst_rate) VALUES(?,?,?)").run(name.trim(),hsnCode.trim(),Number(gstRate));
+      return json(res, 200, { ok:true, category:{id:info.lastInsertRowid,name:name.trim(),hsn_code:hsnCode.trim(),gst_rate:Number(gstRate)} });
+    } catch(e) { return json(res, 409, { error:"Category already exists." }); }
   }
 
   return false;
@@ -838,9 +916,10 @@ async function initSqlite() {
   db = new DatabaseSync(join(ROOT, "novapos.db"));
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER);
+    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, hsn_code TEXT NOT NULL, gst_rate REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0, category_id INTEGER);
     CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT);
-    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER);
+    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, email TEXT);
     CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, supplier_id INTEGER, po_number TEXT, status TEXT, total REAL, created_at TEXT);
@@ -856,13 +935,23 @@ async function initSqlite() {
   }
   const count = db.prepare("SELECT COUNT(*) c FROM products").get().c;
   if (!count) {
-    const ins = db.prepare("INSERT INTO products (id, name, sku, price, stock) VALUES (?, ?, ?, ?, ?)");
+    // Seed GST categories first
+    const CAT_DATA = [
+      [1,"Biscuits & Bakery","1905",18],[2,"Beverages","2202",18],[3,"Dairy Products","0401",5],
+      [4,"Soap & Detergent","3401",18],[5,"Shampoo & Hair Care","3305",18],[6,"Mobile Phones","8517",18],
+      [7,"Medicines","3004",12],[8,"Fresh Vegetables","0702",0],[9,"Branded Garments","6109",12],
+      [10,"Footwear","6401",5],[11,"Packaged Food","2106",18],[12,"Coffee & Tea","2101",18],
+      [13,"Edible Oil","1511",5],[14,"Cereals & Grains","1001",0],[15,"Electrical Goods","8501",18],
+      [16,"Aerated Drinks","2202",28],
+    ];
+    CAT_DATA.forEach(([id,n,h,g]) => db.prepare("INSERT OR IGNORE INTO categories(id,name,hsn_code,gst_rate) VALUES(?,?,?,?)").run(id,n,h,g));
+    const ins = db.prepare("INSERT INTO products (id,name,sku,price,stock,hsn_code,gst_rate,category_id) VALUES(?,?,?,?,?,?,?,?)");
     [
-      [crypto.randomUUID(), "Coffee 250g", "CF-250", 8.5, 42],
-      [crypto.randomUUID(), "Milk 1L",     "MLK-1L", 2.2, 25],
-      [crypto.randomUUID(), "Bread Loaf",  "BR-LOAF",1.8, 14],
-      [crypto.randomUUID(), "Chocolate Bar","CH-80", 1.25, 8],
-      [crypto.randomUUID(), "Orange Juice","OJ-1L",  3.9, 12],
+      [crypto.randomUUID(),"Coffee 250g",  "CF-250",  8.50,42,"2101",18,12],
+      [crypto.randomUUID(),"Milk 1L",      "MLK-1L",  2.20,25,"0401", 5, 3],
+      [crypto.randomUUID(),"Bread Loaf",   "BR-LOAF", 1.80,14,"1905",18, 1],
+      [crypto.randomUUID(),"Chocolate Bar","CH-80",   1.25, 8,"1905",18, 1],
+      [crypto.randomUUID(),"Orange Juice", "OJ-1L",   3.90,12,"2202",18, 2],
     ].forEach((row) => ins.run(...row));
   }
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
@@ -888,29 +977,43 @@ async function initSupabase() {
       await sbQuery("users", "POST", { username: "cashier", password: hashPassword("cash123"),  role: "user"  });
       console.log("⚠️  Default users created. Change passwords after first login!");
     }
+    // Seed GST categories
+    const existingCats = await sbQuery("categories","GET",null,"?select=id&limit=1").catch(()=>null);
+    if (!existingCats || existingCats.length === 0) {
+      console.log("🌱 Seeding GST categories into Supabase...");
+      const CATS = [
+        {name:"Biscuits & Bakery",  hsn_code:"1905",gst_rate:18},{name:"Beverages",           hsn_code:"2202",gst_rate:18},
+        {name:"Dairy Products",     hsn_code:"0401",gst_rate:5}, {name:"Soap & Detergent",    hsn_code:"3401",gst_rate:18},
+        {name:"Shampoo & Hair Care",hsn_code:"3305",gst_rate:18},{name:"Mobile Phones",        hsn_code:"8517",gst_rate:18},
+        {name:"Medicines",          hsn_code:"3004",gst_rate:12},{name:"Fresh Vegetables",     hsn_code:"0702",gst_rate:0},
+        {name:"Branded Garments",   hsn_code:"6109",gst_rate:12},{name:"Footwear",             hsn_code:"6401",gst_rate:5},
+        {name:"Packaged Food",      hsn_code:"2106",gst_rate:18},{name:"Coffee & Tea",         hsn_code:"2101",gst_rate:18},
+        {name:"Edible Oil",         hsn_code:"1511",gst_rate:5}, {name:"Cereals & Grains",     hsn_code:"1001",gst_rate:0},
+        {name:"Electrical Goods",   hsn_code:"8501",gst_rate:18},{name:"Aerated Drinks",       hsn_code:"2202",gst_rate:28},
+      ];
+      for (const c of CATS) await sbQuery("categories","POST",c).catch(()=>{});
+    }
     // Seed products
     const products = await sbQuery("products", "GET", null, "?select=id&limit=1");
     if (!products || products.length === 0) {
       console.log("🌱 Seeding default products into Supabase...");
+      const allCats = await sbQuery("categories","GET",null,"?select=id,name").catch(()=>[]) || [];
+      const cid = n => allCats.find(c=>c.name===n)?.id||null;
       const items = [
-        { id: crypto.randomUUID(), name: "Coffee 250g",   sku: "CF-250",  price: 8.5,  stock: 42 },
-        { id: crypto.randomUUID(), name: "Milk 1L",       sku: "MLK-1L",  price: 2.2,  stock: 25 },
-        { id: crypto.randomUUID(), name: "Bread Loaf",    sku: "BR-LOAF", price: 1.8,  stock: 14 },
-        { id: crypto.randomUUID(), name: "Chocolate Bar", sku: "CH-80",   price: 1.25, stock: 8  },
-        { id: crypto.randomUUID(), name: "Orange Juice",  sku: "OJ-1L",   price: 3.9,  stock: 12 },
+        { id:crypto.randomUUID(), name:"Coffee 250g",   sku:"CF-250",  price:8.5,  stock:42, hsn_code:"2101",gst_rate:18, category_id:cid("Coffee & Tea") },
+        { id:crypto.randomUUID(), name:"Milk 1L",       sku:"MLK-1L",  price:2.2,  stock:25, hsn_code:"0401",gst_rate:5,  category_id:cid("Dairy Products") },
+        { id:crypto.randomUUID(), name:"Bread Loaf",    sku:"BR-LOAF", price:1.8,  stock:14, hsn_code:"1905",gst_rate:18, category_id:cid("Biscuits & Bakery") },
+        { id:crypto.randomUUID(), name:"Chocolate Bar", sku:"CH-80",   price:1.25, stock:8,  hsn_code:"1905",gst_rate:18, category_id:cid("Biscuits & Bakery") },
+        { id:crypto.randomUUID(), name:"Orange Juice",  sku:"OJ-1L",   price:3.9,  stock:12, hsn_code:"2202",gst_rate:18, category_id:cid("Beverages") },
       ];
       for (const p of items) await sbQuery("products", "POST", p);
     }
     // Seed settings
     const settings = await sbQuery("settings", "GET", null, "?select=key&limit=1");
     if (!settings || settings.length === 0) {
-      for (const row of [{key:"currency",value:"USD"},{key:"theme",value:"light"},{key:"cashierName",value:""}]) {
-        await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
-          method:"POST",
-          headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates,return=minimal"},
-          body:JSON.stringify(row)
-        });
-      }
+      await sbQuery("settings", "POST", { key: "currency",    value: "USD"   });
+      await sbQuery("settings", "POST", { key: "theme",       value: "light" });
+      await sbQuery("settings", "POST", { key: "cashierName", value: ""      });
     }
     console.log("✅ Supabase ready!");
   } catch (err) {

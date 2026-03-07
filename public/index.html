@@ -78,19 +78,19 @@
         <div class="panel-header"><h3>Current Sale</h3></div>
         <div class="cart-list-wrap">
           <table id="cartTable">
-            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th><th></th></tr></thead>
+            <thead><tr><th>Item / HSN</th><th>Qty</th><th>Unit Price</th><th>Incl. GST</th><th></th></tr></thead>
             <tbody id="cartBody"></tbody>
           </table>
         </div>
         <form id="checkoutForm" class="checkout-form">
           <label class="field"><span>Discount (%)</span><input id="discount" type="number" min="0" max="100" value="0" /></label>
-          <label class="field"><span>Tax (%)</span><input id="tax" type="number" min="0" max="100" value="10" /></label>
-          <label class="field"><span>GST Preset</span>
-            <select id="gstPreset">
-              <option value="">Custom</option><option value="5">GST 5%</option>
-              <option value="12">GST 12%</option><option value="18">GST 18%</option><option value="28">GST 28%</option>
-            </select>
-          </label>
+          <!-- GST is auto-applied per product — no cashier input needed -->
+          <input id="tax" type="hidden" value="0" />
+          <input id="gstPreset" type="hidden" value="" />
+          <div class="gst-auto-banner">
+            <span>🏷️ GST auto-applied per product</span>
+            <span id="gstBreakdown" class="gst-breakdown-line">Add items to see GST</span>
+          </div>
           <label class="field"><span>Payment Method</span>
             <select id="paymentMethod">
               <option value="Cash">Cash</option><option value="Card">Card</option>
@@ -106,7 +106,7 @@
           <div class="totals">
             <p><span>Subtotal</span><strong id="subtotal">$0.00</strong></p>
             <p><span>Discount</span><strong id="discountValue">-$0.00</strong></p>
-            <p><span>Tax</span><strong id="taxValue">$0.00</strong></p>
+            <p><span>GST (auto)</span><strong id="taxValue">$0.00</strong></p>
             <p class="grand-total"><span>Total</span><strong id="grandTotal">$0.00</strong></p>
             <p><span>Change</span><strong id="changeDue">$0.00</strong></p>
           </div>
@@ -215,8 +215,29 @@
                 <form id="productForm">
                   <div class="field"><span>Product Name</span><input id="productName" type="text" placeholder="e.g. Coca Cola 500ml" required /></div>
                   <div class="field"><span>SKU / Barcode</span><input id="productSku" type="text" placeholder="e.g. SKU-001" required /></div>
-                  <div class="field"><span>Selling Price</span><input id="productPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
+                  <div class="field"><span>Selling Price (excl. GST)</span><input id="productPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
                   <div class="field"><span>Initial Stock</span><input id="productStock" type="number" min="0" step="1" placeholder="0" required /></div>
+                  <div class="field">
+                    <span>Category <small style="color:var(--primary);font-weight:600">(auto-fills HSN &amp; GST ↓)</small></span>
+                    <select id="productCategory"><option value="">— Select Category —</option></select>
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                    <div class="field">
+                      <span>HSN Code</span>
+                      <input id="productHsn" type="text" placeholder="e.g. 1905" maxlength="8" />
+                    </div>
+                    <div class="field">
+                      <span>GST Rate</span>
+                      <select id="productGst">
+                        <option value="0">0% — Exempt</option>
+                        <option value="5">5%</option>
+                        <option value="12">12%</option>
+                        <option value="18" selected>18%</option>
+                        <option value="28">28%</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p style="font-size:0.74rem;color:var(--muted);margin:0.1rem 0 0.5rem">Select a category to auto-fill, or enter HSN &amp; GST manually.</p>
                   <button class="btn" type="submit" style="width:100%;margin-top:0.4rem">➕ Add Product</button>
                 </form>
               </div>
@@ -262,7 +283,7 @@
               </div>
               <div class="pane-table-wrap">
                 <table>
-                  <thead><tr><th>Name</th><th>SKU</th><th>Price</th><th>Stock</th><th>Edit</th></tr></thead>
+                  <thead><tr><th>Name</th><th>SKU</th><th>HSN</th><th>GST</th><th>Price</th><th>Stock</th><th>Edit</th></tr></thead>
                   <tbody id="inventoryTableBody"></tbody>
                 </table>
               </div>
@@ -270,7 +291,65 @@
           </div>
         </div>
 
+        <!-- ── GST CATEGORIES ── -->
+        <div class="admin-pane" id="tab-gst-categories">
+          <div class="pane-body two-col">
+            <div style="display:grid;gap:1rem">
+
+              <div class="pane-card">
+                <div class="pane-card-title">🏷️ Add GST Category</div>
+                <p class="pane-card-hint">Assign a category to any product. HSN code and GST rate are stored once here — the POS applies them <strong>automatically</strong> at billing. No manual GST selection needed.</p>
+                <form id="categoryForm">
+                  <div class="field">
+                    <span>Category Name</span>
+                    <input id="catName" type="text" placeholder="e.g. Biscuits &amp; Bakery" required />
+                  </div>
+                  <div class="field">
+                    <span>HSN Code</span>
+                    <input id="catHsn" type="text" placeholder="e.g. 1905" required maxlength="8" />
+                    <small style="color:var(--muted);font-size:0.73rem;margin-top:2px;display:block">Find codes at cbic.gov.in → GST Tariff</small>
+                  </div>
+                  <div class="field">
+                    <span>GST Rate</span>
+                    <select id="catGst" required>
+                      <option value="0">0% — Exempt (milk, eggs, fresh vegetables)</option>
+                      <option value="5">5% — Essential (edible oil, footwear &lt;₹1000)</option>
+                      <option value="12">12% — Standard (medicines, branded garments)</option>
+                      <option value="18" selected>18% — Standard (soaps, biscuits, beverages)</option>
+                      <option value="28">28% — Luxury (aerated drinks, tobacco)</option>
+                    </select>
+                  </div>
+                  <button class="btn" type="submit" style="width:100%;margin-top:0.4rem">➕ Add Category</button>
+                </form>
+              </div>
+
+              <div class="pane-card">
+                <div class="pane-card-title">📖 Indian GST Rate Guide</div>
+                <div style="display:grid;gap:0.35rem;font-size:0.79rem;line-height:1.6">
+                  <div><span class="gst-pill g0">0%</span> Fresh vegetables, milk, curd, eggs, cereals, unbranded bread</div>
+                  <div><span class="gst-pill g5">5%</span> Edible oil, sugar, tea, coffee beans, footwear &lt;₹1000</div>
+                  <div><span class="gst-pill g12">12%</span> Processed food, medicines, computers, mobile phones &lt;₹12k</div>
+                  <div><span class="gst-pill g18">18%</span> Soaps, shampoo, biscuits, pastries, cameras, IT services</div>
+                  <div><span class="gst-pill g28">28%</span> Aerated drinks, luxury cars, tobacco, casinos</div>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="pane-card">
+              <div class="pane-card-title">All GST Categories</div>
+              <div class="pane-table-wrap">
+                <table>
+                  <thead><tr><th>Category</th><th>HSN Code</th><th>GST Rate</th><th>CGST + SGST Split</th></tr></thead>
+                  <tbody id="categoriesTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- ── SUPPLIERS ── -->
+
         <div class="admin-pane" id="tab-suppliers">
           <div class="pane-body two-col">
             <div class="pane-card">
