@@ -54,7 +54,14 @@ function applySessionState() {
   const isAdmin = state.currentUser?.role === "admin";
   document.body.classList.toggle("authenticated", logged);
   if (inventoryAdmin) inventoryAdmin.hidden = !isAdmin;
-  if (adminOpsPanel)  adminOpsPanel.hidden  = !isAdmin;
+  // Admin dashboard is now a full-screen overlay — show/hide the button
+  const adminBtn = document.getElementById("adminDashBtn");
+  if (adminBtn) adminBtn.style.display = isAdmin ? "flex" : "none";
+  // If user logs out while dashboard is open, close it
+  if (!isAdmin && adminOpsPanel) {
+    adminOpsPanel.classList.remove("open");
+    adminOpsPanel.hidden = true;
+  }
 
   if (cashierNameInput) { cashierNameInput.value = state.currentUser?.username || ""; cashierNameInput.disabled = true; }
 }
@@ -454,6 +461,31 @@ async function resetUserPassword(username) {
 
 
 // ── ADMIN SIDEBAR TABS ─────────────────────────────────────────
+const TAB_LABELS = {
+  "suppliers": "Suppliers",
+  "purchase-orders": "Purchase Orders",
+  "stock-transfer": "Stock Transfer",
+  "batches": "Batch / Expiry",
+  "customers": "Customers",
+  "reports": "Reports",
+  "users": "User Management"
+};
+
+function openAdminDashboard() {
+  const panel = document.getElementById("adminOpsPanel");
+  if (!panel) return;
+  panel.hidden = false;
+  requestAnimationFrame(() => panel.classList.add("open"));
+  document.body.style.overflow = "hidden";
+}
+function closeAdminDashboard() {
+  const panel = document.getElementById("adminOpsPanel");
+  if (!panel) return;
+  panel.classList.remove("open");
+  document.body.style.overflow = "";
+  setTimeout(() => { if (!panel.classList.contains("open")) panel.hidden = true; }, 220);
+}
+
 function initAdminTabs() {
   const tabs = document.querySelectorAll(".admin-tab");
   tabs.forEach(tab => {
@@ -461,10 +493,24 @@ function initAdminTabs() {
       tabs.forEach(t => t.classList.remove("active"));
       document.querySelectorAll(".admin-pane").forEach(p => p.classList.remove("active"));
       tab.classList.add("active");
-      const pane = document.getElementById("tab-" + tab.dataset.tab);
+      const key = tab.dataset.tab;
+      const pane = document.getElementById("tab-" + key);
       if (pane) pane.classList.add("active");
+      // Update topbar title
+      const label = TAB_LABELS[key] || key;
+      const titleEl = document.getElementById("adminPaneTitle");
+      const breadEl = document.getElementById("adminPaneBreadcrumb");
+      if (titleEl) titleEl.textContent = label;
+      if (breadEl) breadEl.textContent = label;
     });
   });
+  // Open button
+  document.getElementById("adminDashBtn")?.addEventListener("click", openAdminDashboard);
+  // Close buttons
+  document.getElementById("adminCloseBtn")?.addEventListener("click", closeAdminDashboard);
+  document.getElementById("adminCloseBtnTop")?.addEventListener("click", closeAdminDashboard);
+  // ESC key to close
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeAdminDashboard(); });
 }
 
 function init() {

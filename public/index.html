@@ -45,6 +45,7 @@
         </label>
         <button id="darkModeBtn" class="btn ghost" type="button">🌙 Dark Mode</button>
         <button id="newSaleBtn"  class="btn ghost" type="button">New Sale</button>
+        <button id="adminDashBtn" class="admin-open-btn" type="button" style="display:none">⚙️ Admin</button>
         <button id="logoutBtn"   class="btn danger" type="button">Logout</button>
       </div>
     </header>
@@ -149,16 +150,16 @@
       </div>
     </section>
 
-    <!-- ADMIN DASHBOARD (admin only) -->
-    <section class="panel admin-dashboard" id="adminOpsPanel" hidden>
-      <div class="admin-dash-header">
-        <h3>⚙️ Admin Dashboard</h3>
-        <p class="admin-dash-sub">Manage your store — select a section from the left</p>
-      </div>
-      <div class="admin-dash-layout">
+    <!-- ADMIN DASHBOARD — full screen overlay (admin only) -->
+    <section class="admin-dashboard" id="adminOpsPanel" hidden>
 
-        <!-- SIDEBAR -->
-        <nav class="admin-sidebar">
+      <!-- LEFT SIDEBAR — icon-only, expands on hover -->
+      <nav class="admin-sidebar">
+        <div class="sidebar-brand">
+          <div class="sidebar-brand-icon">⚡</div>
+          <span class="sidebar-brand-name">Admin</span>
+        </div>
+        <div class="sidebar-nav">
           <button class="admin-tab active" data-tab="suppliers">
             <span class="tab-icon">🏭</span><span class="tab-label">Suppliers</span>
           </button>
@@ -180,10 +181,32 @@
           <button class="admin-tab" data-tab="users">
             <span class="tab-icon">👥</span><span class="tab-label">User Management</span>
           </button>
-        </nav>
+        </div>
+        <div class="sidebar-bottom">
+          <button class="sidebar-close-btn" id="adminCloseBtn" type="button">
+            <span class="tab-icon">✕</span>
+            <span class="sidebar-close-label">Close Dashboard</span>
+          </button>
+        </div>
+      </nav>
 
-        <!-- CONTENT PANES -->
-        <div class="admin-content">
+      <!-- RIGHT CONTENT -->
+      <div class="admin-content">
+        <!-- Top bar -->
+        <div class="admin-topbar">
+          <div>
+            <h3 id="adminPaneTitle">Suppliers</h3>
+            <span class="admin-breadcrumb">Admin Dashboard → <span id="adminPaneBreadcrumb">Suppliers</span></span>
+          </div>
+          <div class="admin-topbar-right">
+            <button class="sidebar-close-btn" id="adminCloseBtnTop" type="button" style="color:var(--danger);font-weight:600;padding:0.4rem 0.8rem;border:1px solid var(--border);border-radius:8px;background:var(--surface)">
+              <span class="tab-icon">✕</span>
+              <span style="opacity:1;white-space:nowrap;font-size:0.82rem">Close</span>
+            </button>
+          </div>
+        </div>
+        <!-- Scrollable pane area -->
+        <div class="admin-pane-wrap">
 
           <!-- SUPPLIERS -->
           <div class="admin-pane active" id="tab-suppliers">
@@ -349,8 +372,8 @@
             </div>
           </div>
 
-        </div><!-- /admin-content -->
-      </div><!-- /admin-dash-layout -->
+        </div><!-- /admin-pane-wrap -->
+      </div><!-- /admin-content -->
     </section>
 
   </main>
