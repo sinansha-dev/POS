@@ -199,6 +199,48 @@ $$;
 
 > ✅ You should see: **Success. No rows returned.**
 
+### Step 2.1 — Migration for latest pricing model (required for existing projects)
+
+If your Supabase project was created before wholesale/retail pricing support, run this migration too:
+
+```sql
+-- Tax master
+CREATE TABLE IF NOT EXISTS tax_codes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  gst_rate REAL DEFAULT 0,
+  cess_rate REAL DEFAULT 0
+);
+
+-- Product pricing / tax extensions
+ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS wholesale_price REAL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS retail_price REAL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS mrp REAL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS cess_rate REAL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_code TEXT;
+
+-- Backfill existing products
+UPDATE products SET barcode = COALESCE(barcode, sku);
+UPDATE products SET retail_price = COALESCE(retail_price, price);
+UPDATE products
+SET wholesale_price = COALESCE(
+  wholesale_price,
+  ROUND(price / (1 + (COALESCE(gst_rate,0) + COALESCE(cess_rate,0))/100.0), 2)
+);
+UPDATE products
+SET mrp = CASE WHEN COALESCE(mrp,0) <= 0 THEN retail_price ELSE mrp END;
+
+-- Seed default Indian GST + Cess codes
+INSERT INTO tax_codes (id, name, gst_rate, cess_rate) VALUES
+  ('GST_5', 'GST 5%', 5, 0),
+  ('GST_12', 'GST 12%', 12, 0),
+  ('GST_18', 'GST 18%', 18, 0),
+  ('GST_28', 'GST 28%', 28, 0),
+  ('GST_28_CESS12', 'GST 28% + Cess 12%', 28, 12)
+ON CONFLICT (id) DO NOTHING;
+```
+
 ### Step 3 — Get your API keys
 
 Go to **Settings → API** in your Supabase dashboard:

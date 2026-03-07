@@ -850,6 +850,23 @@ function recalcRetailPreview() {
     else if (retail < wholesale) err.textContent = "Retail price must be greater than or equal to wholesale price.";
     else err.textContent = "";
   }
+  updatePricingPreview();
+}
+
+function updatePricingPreview() {
+  const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
+  const retail = Number(document.getElementById("productRetail")?.value || 0);
+  const mrp = Number(document.getElementById("productMrp")?.value || 0);
+  const gst = Number(document.getElementById("productGst")?.value || 0);
+  const suggested = +(wholesale + (wholesale * gst / 100)).toFixed(2);
+  const preview = document.getElementById("pricingPreview");
+  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)} | Retail ₹${retail.toFixed(2)}`;
+  const err = document.getElementById("pricingError");
+  if (err) {
+    if (mrp > 0 && retail > mrp) err.textContent = "Retail price cannot exceed MRP.";
+    else if (retail < wholesale) err.textContent = "Retail price must be greater than or equal to wholesale price.";
+    else err.textContent = "";
+  }
 }
 
 function renderCategoriesTable() {
