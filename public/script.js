@@ -61,18 +61,27 @@ function applySessionState() {
 
 function money(v) { return new Intl.NumberFormat("en-US", { style: "currency", currency: state.currency }).format(v || 0); }
 
+function extractInclusiveTax(amount, gstRate) {
+  const rate = Number(gstRate || 0);
+  const gross = Number(amount || 0);
+  if (!rate || gross <= 0) return { gross, gst: 0, base: gross, cgst: 0, sgst: 0 };
+  const gst = +(gross * rate / (100 + rate)).toFixed(2);
+  const base = +(gross - gst).toFixed(2);
+  const cgst = +(gst / 2).toFixed(2);
+  return { gross, gst, base, cgst, sgst: +(gst - cgst).toFixed(2) };
+}
+
 function saleTotals() {
   const subtotal     = state.cart.reduce((s, i) => s + i.price * i.qty, 0);
   const discountRate = Number(document.getElementById("discount")?.value || 0) / 100;
   const discountAmt  = subtotal * discountRate;
-  // Per-item GST — each product carries its own rate (Indian GST rules)
+  // GST-inclusive pricing: GST is extracted from selling price, not added on top.
   const taxAmount = +state.cart.reduce((sum, i) => {
     const lineVal  = i.price * i.qty;
     const lineDisc = lineVal * discountRate;
-    return sum + (lineVal - lineDisc) * (i.gstRate || 0) / 100;
+    return sum + extractInclusiveTax(lineVal - lineDisc, i.gstRate || 0).gst;
   }, 0).toFixed(2);
-  const taxable = Math.max(subtotal - discountAmt, 0);
-  const total   = +(taxable + taxAmount).toFixed(2);
+  const total   = +Math.max(subtotal - discountAmt, 0).toFixed(2);
   const pm      = document.getElementById("paymentMethod")?.value;
   const splitTotal = ["splitCash","splitCard","splitWallet"].reduce((s, id) => s + Number(document.getElementById(id)?.value || 0), 0);
   const received = pm === "Split" ? splitTotal : Number(document.getElementById("amountReceived")?.value || 0);
@@ -145,12 +154,12 @@ function renderCart() {
   cartBody.innerHTML = "";
   state.cart.forEach(item => {
     const row = document.createElement("tr");
-    const lineGst = +(item.price * item.qty * (item.gstRate||0) / 100).toFixed(2);
+    const line = extractInclusiveTax(item.price * item.qty, item.gstRate || 0);
     row.innerHTML = `
       <td>${item.name}${item.hsnCode ? `<br><small style="color:var(--muted);font-size:0.7rem;font-family:monospace">HSN: ${item.hsnCode}</small>` : ''}</td>
       <td><input type="number" min="1" value="${item.qty}" style="width:54px;border:1px solid var(--border);border-radius:6px;padding:2px 5px;background:var(--surface);color:var(--text)"/></td>
-      <td>${money(item.price)}<br><small style="color:var(--muted);font-size:0.7rem">+${item.gstRate||0}% GST</small></td>
-      <td>${money(item.price * item.qty + lineGst)}<br><small style="color:var(--muted);font-size:0.7rem">tax: ${money(lineGst)}</small></td>
+      <td>${money(item.price)}<br><small style="color:var(--muted);font-size:0.7rem">GST incl. @ ${item.gstRate||0}%</small></td>
+      <td>${money(line.gross)}<br><small style="color:var(--muted);font-size:0.7rem">GST incl.: ${money(line.gst)}</small></td>
       <td><button class="btn danger" type="button" style="padding:0.2rem 0.5rem">×</button></td>`;
     row.querySelector("input").addEventListener("change", e => {
       const v = parseInt(e.target.value); const p = state.products.find(x => x.id === item.productId);
@@ -304,7 +313,10 @@ function renderCustomers() {
 
 function buildGstBreakdownLine() {
   const byRate = {};
-  state.cart.forEach(i => { const r = i.gstRate||0; byRate[r] = (byRate[r]||0) + i.price * i.qty * r / 100; });
+  state.cart.forEach(i => {
+    const r = i.gstRate || 0;
+    byRate[r] = (byRate[r] || 0) + extractInclusiveTax(i.price * i.qty, r).gst;
+  });
   const parts = Object.entries(byRate).filter(([r]) => Number(r) > 0).map(([r,v]) => `GST@${r}%: ${money(+v.toFixed(2))}`);
   return parts.length ? parts.join("  |  ") : "All items: 0% GST exempt";
 }
@@ -320,7 +332,7 @@ function buildReceipt(sale, totals) {
   const gstGroups = {};
   state.cart.forEach(i => {
     const r = i.gstRate||0; if (!r) return;
-    gstGroups[r] = (gstGroups[r]||0) + i.price * i.qty * r / 100;
+    gstGroups[r] = (gstGroups[r]||0) + extractInclusiveTax(i.price * i.qty, r).gst;
   });
 
   const header = [
@@ -338,13 +350,13 @@ function buildReceipt(sale, totals) {
 
   const itemLines = state.cart.map(i => {
     const lineAmt = i.price * i.qty;
-    const lineGst = +(lineAmt * (i.gstRate||0) / 100).toFixed(2);
+    const lineTax = extractInclusiveTax(lineAmt, i.gstRate || 0);
     return lpad(i.name, 20)
       + rpad(i.hsnCode||i.hsn_code||"—", 7)
       + rpad(i.qty, 4)
       + rpad(money(i.price), 8)
       + rpad((i.gstRate||0)+"%", 5)
-      + rpad(money(lineAmt + lineGst), 8);
+      + rpad(money(lineTax.gross), 8);
   });
 
   // GST Summary table
@@ -365,11 +377,11 @@ function buildReceipt(sale, totals) {
 
   const footer = [
     line2,
-    `  Subtotal  : ${money(totals.subtotal)}`,
+    `  Subtotal (Incl. GST): ${money(totals.subtotal)}`,
     `  Discount  : -${money(totals.discountAmount)}`,
-    `  Total GST : ${money(totals.taxAmount)}`,
+    `  Total GST (included): ${money(totals.taxAmount)}`,
     "  " + "─".repeat(W - 2),
-    `  TOTAL     : ${money(totals.total)}`,
+    `  TOTAL PAYABLE: ${money(totals.total)}`,
     `  Received  : ${money(totals.received)}`,
     `  Change    : ${money(totals.change)}`,
     LINE,
