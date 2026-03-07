@@ -312,24 +312,17 @@ const DB = {
 
   async updateSetting(key, value) {
     if (SUPABASE_URL) {
-      await sbQuery("settings", "POST",
-        { key, value },
-        "");
-      // upsert
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/settings?key=eq.${key}`, {
-        method: "PATCH",
+      // True upsert — POST with resolution=merge-duplicates handles INSERT or UPDATE
+      await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
+        method: "POST",
         headers: {
           "apikey": SUPABASE_KEY,
           "Authorization": `Bearer ${SUPABASE_KEY}`,
           "Content-Type": "application/json",
-          "Prefer": "return=minimal",
+          "Prefer": "resolution=merge-duplicates,return=minimal",
         },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ key, value }),
       });
-      // If no rows updated, insert
-      if (res.headers.get("content-range") === "*/0") {
-        await sbQuery("settings", "POST", { key, value });
-      }
     } else {
       getDb().prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         .run(key, value);
@@ -872,9 +865,19 @@ async function initSupabase() {
     // Seed settings
     const settings = await sbQuery("settings", "GET", null, "?select=key&limit=1");
     if (!settings || settings.length === 0) {
-      await sbQuery("settings", "POST", { key: "currency",    value: "USD"   });
-      await sbQuery("settings", "POST", { key: "theme",       value: "light" });
-      await sbQuery("settings", "POST", { key: "cashierName", value: ""      });
+      // Upsert defaults — safe to run on every boot
+      for (const row of [{ key: "currency", value: "USD" }, { key: "theme", value: "light" }, { key: "cashierName", value: "" }]) {
+        await fetch(`${SUPABASE_URL}/rest/v1/settings`, {
+          method: "POST",
+          headers: {
+            "apikey": SUPABASE_KEY,
+            "Authorization": `Bearer ${SUPABASE_KEY}`,
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+          },
+          body: JSON.stringify(row),
+        });
+      }
     }
     console.log("✅ Supabase ready!");
   } catch (err) {
