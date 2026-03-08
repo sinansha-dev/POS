@@ -320,8 +320,21 @@ const DB = {
 
   async decrementStock(id, qty) {
     if (SUPABASE_URL) {
-      // Use RPC for atomic decrement
-      await sbRpc("decrement_stock", { p_id: id, p_qty: qty });
+      // Direct PATCH — no Supabase RPC function required
+      const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&select=id,stock&limit=1`);
+      const current = Number(rows?.[0]?.stock || 0);
+      const newStock = Math.max(current - qty, 0);
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`, {
+        method: "PATCH",
+        headers: {
+          "apikey":        SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type":  "application/json",
+          "Prefer":        "return=minimal",
+        },
+        body: JSON.stringify({ stock: newStock }),
+      });
+      if (!patchRes.ok) throw new Error(`Stock update failed for product ${id}: ${await patchRes.text()}`);
     } else {
       getDb().prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(qty, id);
     }
