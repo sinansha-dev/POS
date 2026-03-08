@@ -525,27 +525,19 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/products" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const body = await parseBody(req);
-    const {
-      name,
-      sku,
-      barcode,
-      wholesalePrice,
-      mrp,
-      stock,
-      hsnCode,
-      gstRate,
-      cessRate,
-      taxCode,
-      categoryId,
-    } = body;
+    const { name, sku, barcode, wholesalePrice, retailPrice: rawRetail, mrp, stock, hsnCode, gstRate, cessRate, categoryId } = body;
     if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
     const wholesale = Number(wholesalePrice);
     const gst = Number(gstRate || 0);
     const cess = Number(cessRate || 0);
-    const retailPrice = +(wholesale + (wholesale * (gst + cess) / 100)).toFixed(2);
-    if (retailPrice > Number(mrp)) return json(res, 400, { error: "Retail price cannot exceed MRP." });
-    if (retailPrice < wholesale) return json(res, 400, { error: "Retail price must be greater than or equal to wholesale price." });
+    // Use retailPrice from frontend (user-editable); fallback to auto-calc
+    const retailPrice = rawRetail ? Number(rawRetail) : +(wholesale + (wholesale * (gst + cess) / 100)).toFixed(2);
+    const mrpVal = Number(mrp);
+    // MRP of 0 means user didn't set it — default to retail. Otherwise retail must be <= MRP.
+    const finalMrp = mrpVal <= 0 ? retailPrice : mrpVal;
+    if (retailPrice > finalMrp) return json(res, 400, { error: "Retail price cannot exceed MRP." });
+    if (retailPrice < wholesale) return json(res, 400, { error: "Retail price must be >= wholesale price." });
     try {
       await DB.addProduct(crypto.randomUUID(), {
         name: name.trim(),
@@ -553,12 +545,12 @@ async function handleApi(req, res, pathname) {
         barcode: String(barcode || sku).trim(),
         wholesalePrice: wholesale,
         retailPrice,
-        mrp: Number(mrp),
+        mrp: finalMrp,
         stock: Number(stock),
         hsnCode: String(hsnCode || "").trim(),
         gstRate: gst,
         cessRate: cess,
-        taxCode: String(taxCode || "").trim() || null,
+        taxCode: null,
         categoryId: categoryId || null,
       });
       return json(res, 200, { ok: true });
@@ -662,27 +654,29 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === "/api/purchase-orders" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
-    const { supplierId, sku, qty, cost } = await parseBody(req);
+    const { supplierId, sku, qty } = await parseBody(req);
     if (!supplierId || !sku || Number(qty) <= 0) return json(res, 400, { error: "Invalid purchase order." });
     const poNumber = `PO-${Date.now()}`;
     if (SUPABASE_URL) {
-      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku)}&limit=1`);
+      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
       if (!products || !products.length) return json(res, 404, { error: "SKU not found." });
       const product = products[0];
-      await sbQuery("purchase_orders", "POST", { supplier_id: Number(supplierId), po_number: poNumber, status: "Received", total: Number(cost||0)*Number(qty), created_at: new Date().toISOString() });
+      const newStock = (Number(product.stock) || 0) + Number(qty);
+      await sbQuery("purchase_orders", "POST", { supplier_id: Number(supplierId), po_number: poNumber, status: "Received", total: 0, created_at: new Date().toISOString() });
       await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${product.id}`, {
         method: "PATCH",
         headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
-        body: JSON.stringify({ stock: (product.stock||0) + Number(qty) })
+        body: JSON.stringify({ stock: newStock })
       });
-      return json(res, 200, { ok: true, poNumber });
+      return json(res, 200, { ok: true, poNumber, newStock });
     }
     const dbx = getDb();
-    const product = dbx.prepare("SELECT id FROM products WHERE lower(sku)=lower(?)").get(sku);
+    const product = dbx.prepare("SELECT id, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
     if (!product) return json(res, 404, { error: "SKU not found." });
-    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', ?, ?)").run(Number(supplierId), poNumber, Number(cost||0)*Number(qty), new Date().toISOString());
-    dbx.prepare("UPDATE products SET stock = stock + ? WHERE id=?").run(Number(qty), product.id);
-    return json(res, 200, { ok: true, poNumber });
+    const newStock = (Number(product.stock) || 0) + Number(qty);
+    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', 0, ?)").run(Number(supplierId), poNumber, new Date().toISOString());
+    dbx.prepare("UPDATE products SET stock = ? WHERE id=?").run(newStock, product.id);
+    return json(res, 200, { ok: true, poNumber, newStock });
   }
 
   if (pathname === "/api/stock-transfer" && req.method === "POST") {
@@ -691,11 +685,27 @@ async function handleApi(req, res, pathname) {
     const amount = Number(qty);
     if (!sku || amount <= 0 || !fromStore || !toStore) return json(res, 400, { error: "Invalid transfer payload." });
     if (SUPABASE_URL) {
+      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
+      if (!products || !products.length) return json(res, 404, { error: "SKU not found." });
+      const product = products[0];
+      if ((Number(product.stock) || 0) < amount) return json(res, 400, { error: `Insufficient stock. Available: ${product.stock}` });
+      const newStock = (Number(product.stock) || 0) - amount;
+      await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${product.id}`, {
+        method: "PATCH",
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
+        body: JSON.stringify({ stock: newStock })
+      });
       await sbQuery("stock_transfers", "POST", { sku: String(sku).trim(), qty: amount, from_store: String(fromStore).trim(), to_store: String(toStore).trim(), created_at: new Date().toISOString() });
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, newStock });
     }
-    getDb().prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)").run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
-    return json(res, 200, { ok: true });
+    const dbx = getDb();
+    const product = dbx.prepare("SELECT id, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
+    if (!product) return json(res, 404, { error: "SKU not found." });
+    if ((Number(product.stock) || 0) < amount) return json(res, 400, { error: `Insufficient stock. Available: ${product.stock}` });
+    const newStock = (Number(product.stock) || 0) - amount;
+    dbx.prepare("UPDATE products SET stock = ? WHERE id=?").run(newStock, product.id);
+    dbx.prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)").run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
+    return json(res, 200, { ok: true, newStock });
   }
 
   if (pathname === "/api/stock-batches" && req.method === "POST") {

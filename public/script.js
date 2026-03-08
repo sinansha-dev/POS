@@ -121,7 +121,7 @@ async function loadBootstrap() {
   state.reports    = data.reports    || {};
   currencySelect.value = state.currency;
   applyTheme();
-  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderTaxCodeOptions(); renderCategoriesTable();
+  renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderCategoriesTable();
   await loadReports();
   if (state.currentUser?.role === "admin") await loadUsers();
 }
@@ -414,17 +414,19 @@ async function completeSale(event) {
 
 async function addProduct(event) {
   event.preventDefault();
-  const catId   = document.getElementById("productCategory")?.value;
-  const cat     = state.categories.find(c => String(c.id) === String(catId));
-  const taxCode = state.taxCodes.find(t => String(t.id) === String(document.getElementById("productTaxCode")?.value));
-  const gstRate = Number(taxCode?.gst_rate ?? ((cat && catId) ? cat.gst_rate : 0));
-  const cessRate = Number(taxCode?.cess_rate || 0);
+  const catId  = document.getElementById("productCategory")?.value;
+  const cat    = state.categories.find(c => String(c.id) === String(catId));
+  // GST comes from category if selected, otherwise from the manual GST select
+  const gstRate  = Number(cat ? cat.gst_rate : (document.getElementById("productGst")?.value || 0));
+  const cessRate = 0; // cess only if manually needed — keep simple
   const wholesalePrice = Number(document.getElementById("productWholesale")?.value || 0);
-  const retailPrice = +(wholesalePrice + (wholesalePrice * (gstRate + cessRate) / 100)).toFixed(2);
-  const mrp = Number(document.getElementById("productMrp")?.value || 0);
-  const hsnCode = cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "";
-  if (retailPrice > mrp) { alert("Retail price cannot exceed MRP."); return; }
-  if (retailPrice < wholesalePrice) { alert("Retail price must be greater than or equal to wholesale price."); return; }
+  const retailPrice    = Number(document.getElementById("productRetail")?.value || 0);
+  const mrp            = Number(document.getElementById("productMrp")?.value || 0);
+  const hsnCode        = (cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "");
+  if (wholesalePrice <= 0) { alert("Wholesale price must be greater than 0."); return; }
+  if (retailPrice <= 0)    { alert("Retail price must be greater than 0."); return; }
+  if (retailPrice < wholesalePrice) { alert("Retail price must be >= wholesale price."); return; }
+  if (mrp > 0 && retailPrice > mrp) { alert("Retail price cannot exceed MRP."); return; }
   try {
     await api("/api/products", { method:"POST", body: JSON.stringify({
       name:     document.getElementById("productName").value.trim(),
@@ -432,18 +434,16 @@ async function addProduct(event) {
       barcode:  document.getElementById("productSku").value.trim(),
       wholesalePrice,
       retailPrice,
-      mrp,
+      mrp: mrp || retailPrice,
       stock:    Number(document.getElementById("productStock").value),
       hsnCode,
       gstRate,
       cessRate,
-      taxCode: taxCode?.id || null,
       categoryId: catId || null
     })});
     event.target.reset();
-    const hEl = document.getElementById("productHsn"); if(hEl){ hEl.value=""; hEl.readOnly=false; }
-    const gEl = document.getElementById("productGst"); if(gEl){ gEl.value="GST 18% + Cess 0%"; }
-    await loadBootstrap(); renderCategoryOptions(); renderTaxCodeOptions(); renderCategoriesTable();
+    const hEl = document.getElementById("productHsn"); if(hEl){ hEl.value=""; hEl.readOnly=false; hEl.style.opacity="1"; }
+    await loadBootstrap();
   } catch(err){ alert(err.message); }
 }
 async function updatePrice(event) {
@@ -463,13 +463,32 @@ async function addSupplier(event) {
 }
 async function receivePO(event) {
   event.preventDefault();
-  try { const d=await api("/api/purchase-orders",{method:"POST",body:JSON.stringify({supplierId:document.getElementById("poSupplierId").value,sku:document.getElementById("poSku").value,qty:document.getElementById("poQty").value,cost:document.getElementById("poCost").value})}); event.target.reset(); alert(`✅ PO received: ${d.poNumber}`); await loadBootstrap(); }
-  catch(err){alert(String(err.message).includes("SQLite")?"This feature works when running locally.":err.message);}
+  const sku = document.getElementById("poSku").value.trim();
+  const qty = document.getElementById("poQty").value;
+  const supplierId = document.getElementById("poSupplierId").value;
+  if (!sku || !qty || Number(qty) <= 0) { alert("Please enter a valid SKU and quantity."); return; }
+  try {
+    const d = await api("/api/purchase-orders", { method:"POST", body:JSON.stringify({ supplierId, sku, qty }) });
+    event.target.reset();
+    alert(`✅ PO received: ${d.poNumber}\n+${qty} units added to stock.\nNew stock: ${d.newStock}`);
+    await loadBootstrap();
+    renderInventoryTable();
+  } catch(err){ alert("❌ " + err.message); }
 }
 async function recordTransfer(event) {
   event.preventDefault();
-  try { await api("/api/stock-transfer",{method:"POST",body:JSON.stringify({sku:document.getElementById("transferSku").value,qty:document.getElementById("transferQty").value,fromStore:document.getElementById("fromStore").value,toStore:document.getElementById("toStore").value})}); event.target.reset(); alert("✅ Transfer recorded!"); }
-  catch(err){alert(String(err.message).includes("SQLite")?"This feature works when running locally.":err.message);}
+  const sku      = document.getElementById("transferSku").value.trim();
+  const qty      = document.getElementById("transferQty").value;
+  const fromStore= document.getElementById("fromStore").value.trim();
+  const toStore  = document.getElementById("toStore").value.trim();
+  if (!sku || !qty || Number(qty) <= 0) { alert("Please enter a valid SKU and quantity."); return; }
+  try {
+    const d = await api("/api/stock-transfer", { method:"POST", body:JSON.stringify({ sku, qty, fromStore, toStore }) });
+    event.target.reset();
+    alert(`✅ Transfer recorded!\n${qty} units of "${sku}" moved from ${fromStore} → ${toStore}.\nRemaining stock: ${d.newStock}`);
+    await loadBootstrap();
+    renderInventoryTable();
+  } catch(err){ alert("❌ " + err.message); }
 }
 async function addBatch(event) {
   event.preventDefault();
@@ -783,17 +802,31 @@ function onCategoryChange() {
   const val = document.getElementById("productCategory")?.value;
   const cat = state.categories.find(c => String(c.id) === String(val));
   const hEl = document.getElementById("productHsn");
-  const taxSel = document.getElementById("productTaxCode");
+  const gEl = document.getElementById("productGst");
+  const retailInput = document.getElementById("productRetail");
   if (cat) {
     if (hEl) { hEl.value = cat.hsn_code; hEl.readOnly = true; hEl.style.opacity = "0.6"; }
-    if (taxSel) {
-      const match = (state.taxCodes || []).find(t => Number(t.gst_rate) === Number(cat.gst_rate) && Number(t.cess_rate || 0) === 0);
-      if (match) taxSel.value = String(match.id);
+    // Set GST select to match category
+    if (gEl) {
+      // Find matching option or create one
+      let found = false;
+      for (const opt of gEl.options) {
+        if (Number(opt.value) === Number(cat.gst_rate)) { gEl.value = opt.value; found = true; break; }
+      }
+      if (!found) {
+        const o = document.createElement("option");
+        o.value = String(cat.gst_rate);
+        o.textContent = `GST ${cat.gst_rate}%`;
+        gEl.appendChild(o);
+        gEl.value = String(cat.gst_rate);
+      }
     }
+    // Reset retail so it auto-fills from new GST rate
+    if (retailInput) retailInput.value = "";
   } else {
     if (hEl) { hEl.value = ""; hEl.readOnly = false; hEl.style.opacity = "1"; }
   }
-  syncTaxCodeDetails();
+  recalcRetailPreview();
 }
 
 function renderTaxCodeOptions() {
@@ -833,38 +866,42 @@ function syncTaxCodeDetails() {
 
 function recalcRetailPreview() {
   const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
-  const mrp = Number(document.getElementById("productMrp")?.value || 0);
-  const selectedId = document.getElementById("productTaxCode")?.value;
-  const tax = (state.taxCodes || []).find(t => String(t.id) === String(selectedId));
-  const gst = Number(tax?.gst_rate || 0);
-  const cess = Number(tax?.cess_rate || 0);
-  const taxTotal = gst + cess;
-  const retail = +(wholesale + (wholesale * taxTotal / 100)).toFixed(2);
+  const mrp       = Number(document.getElementById("productMrp")?.value || 0);
+  // Get GST from category if selected, else from manual select
+  const catId = document.getElementById("productCategory")?.value;
+  const cat   = state.categories.find(c => String(c.id) === String(catId));
+  const gst   = cat ? Number(cat.gst_rate || 0) : Number(document.getElementById("productGst")?.value || 0);
+  const suggested = +(wholesale + (wholesale * gst / 100)).toFixed(2);
   const retailInput = document.getElementById("productRetail");
-  if (retailInput) retailInput.value = retail.toFixed(2);
+  // Auto-fill only if retail is currently empty
+  if (retailInput && !retailInput.value) {
+    retailInput.value = suggested.toFixed(2);
+  }
+  const retail = Number(retailInput?.value || suggested);
   const preview = document.getElementById("pricingPreview");
-  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + Tax ${taxTotal}% = ₹${retail.toFixed(2)}`;
+  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)} | Retail ₹${retail.toFixed(2)}`;
   const err = document.getElementById("pricingError");
   if (err) {
-    if (mrp > 0 && retail > mrp) err.textContent = "Retail price cannot exceed MRP.";
-    else if (retail < wholesale) err.textContent = "Retail price must be greater than or equal to wholesale price.";
+    if (mrp > 0 && retail > mrp) err.textContent = "⚠️ Retail price cannot exceed MRP.";
+    else if (retail > 0 && retail < wholesale) err.textContent = "⚠️ Retail price must be >= wholesale price.";
     else err.textContent = "";
   }
-  updatePricingPreview();
 }
 
 function updatePricingPreview() {
   const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
-  const retail = Number(document.getElementById("productRetail")?.value || 0);
-  const mrp = Number(document.getElementById("productMrp")?.value || 0);
-  const gst = Number(document.getElementById("productGst")?.value || 0);
+  const retail    = Number(document.getElementById("productRetail")?.value || 0);
+  const mrp       = Number(document.getElementById("productMrp")?.value || 0);
+  const catId     = document.getElementById("productCategory")?.value;
+  const cat       = state.categories.find(c => String(c.id) === String(catId));
+  const gst       = cat ? Number(cat.gst_rate || 0) : Number(document.getElementById("productGst")?.value || 0);
   const suggested = +(wholesale + (wholesale * gst / 100)).toFixed(2);
   const preview = document.getElementById("pricingPreview");
   if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)} | Retail ₹${retail.toFixed(2)}`;
   const err = document.getElementById("pricingError");
   if (err) {
-    if (mrp > 0 && retail > mrp) err.textContent = "Retail price cannot exceed MRP.";
-    else if (retail < wholesale) err.textContent = "Retail price must be greater than or equal to wholesale price.";
+    if (mrp > 0 && retail > mrp) err.textContent = "⚠️ Retail price cannot exceed MRP.";
+    else if (retail > 0 && retail < wholesale) err.textContent = "⚠️ Retail price must be >= wholesale price.";
     else err.textContent = "";
   }
 }
@@ -911,7 +948,9 @@ function init() {
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
   document.getElementById("checkoutForm")?.addEventListener("submit",completeSale);
   document.getElementById("productForm")?.addEventListener("submit",addProduct);
-  document.getElementById("productTaxCode")?.addEventListener("change", syncTaxCodeDetails);
+  document.getElementById("productTaxCode")?.addEventListener("change", recalcRetailPreview);
+  document.getElementById("productGst")?.addEventListener("change", () => { document.getElementById("productRetail").value=""; recalcRetailPreview(); });
+  document.getElementById("productRetail")?.addEventListener("input", updatePricingPreview);
   document.getElementById("productWholesale")?.addEventListener("input", recalcRetailPreview);
   document.getElementById("productMrp")?.addEventListener("input", recalcRetailPreview);
   document.getElementById("priceForm")?.addEventListener("submit",updatePrice);
