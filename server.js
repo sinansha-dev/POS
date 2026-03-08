@@ -490,7 +490,7 @@ async function bootstrapPayload() {
     const catsRaw = await sbQuery("categories","GET",null,"?select=id,name,hsn_code,gst_rate&order=name").catch(()=>[]) || [];
     return { products, history, settings, taxCodes, suppliers: suppliersRaw, customers, categories: catsRaw, purchaseOrders:[], stockTransfers:[], stockBatches:[], reports:{} };
   }
-  const sqliteCats = !SUPABASE_URL ? (getDb()?.prepare("SELECT id,name,hsn_code,gst_rate FROM categories ORDER BY name").all() || []) : [];
+  const sqliteCats = !SUPABASE_URL ? (() => { try { return getDb()?.prepare("SELECT id,name,hsn_code,gst_rate FROM categories ORDER BY name").all() || []; } catch { return []; } })() : [];
   return { products, history, settings, taxCodes, categories: sqliteCats, ...sqliteFeatureData() };
 }
 
@@ -655,27 +655,41 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/purchase-orders" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const { supplierId, sku, qty } = await parseBody(req);
-    if (!supplierId || !sku || Number(qty) <= 0) return json(res, 400, { error: "Invalid purchase order." });
+    if (!sku || Number(qty) <= 0) return json(res, 400, { error: "Invalid purchase order." });
     const poNumber = `PO-${Date.now()}`;
     if (SUPABASE_URL) {
-      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
-      if (!products || !products.length) return json(res, 404, { error: "SKU not found." });
+      // Try SKU first, then name
+      let products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
+      if (!products || !products.length) {
+        products = await sbQuery("products", "GET", null, `?name=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
+      }
+      if (!products || !products.length) return json(res, 404, { error: `Product "${sku}" not found. Check SKU or name.` });
       const product = products[0];
       const newStock = (Number(product.stock) || 0) + Number(qty);
-      await sbQuery("purchase_orders", "POST", { supplier_id: Number(supplierId), po_number: poNumber, status: "Received", total: 0, created_at: new Date().toISOString() });
+      // Update stock first (most important)
       await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${product.id}`, {
         method: "PATCH",
         headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
         body: JSON.stringify({ stock: newStock })
       });
+      // Record PO — skip gracefully if table missing or FK error
+      try {
+        await sbQuery("purchase_orders", "POST", {
+          supplier_id: supplierId ? Number(supplierId) : null,
+          po_number: poNumber, status: "Received", total: 0,
+          created_at: new Date().toISOString()
+        });
+      } catch (e) { console.warn("PO record insert skipped:", e.message); }
       return json(res, 200, { ok: true, poNumber, newStock });
     }
     const dbx = getDb();
-    const product = dbx.prepare("SELECT id, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
-    if (!product) return json(res, 404, { error: "SKU not found." });
+    // Try SKU first, then name
+    let product = dbx.prepare("SELECT id, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
+    if (!product) product = dbx.prepare("SELECT id, stock FROM products WHERE lower(name)=lower(?)").get(sku.trim());
+    if (!product) return json(res, 404, { error: `Product "${sku}" not found.` });
     const newStock = (Number(product.stock) || 0) + Number(qty);
-    dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', 0, ?)").run(Number(supplierId), poNumber, new Date().toISOString());
     dbx.prepare("UPDATE products SET stock = ? WHERE id=?").run(newStock, product.id);
+    try { dbx.prepare("INSERT INTO purchase_orders (supplier_id, po_number, status, total, created_at) VALUES (?, ?, 'Received', 0, ?)").run(supplierId ? Number(supplierId) : null, poNumber, new Date().toISOString()); } catch {}
     return json(res, 200, { ok: true, poNumber, newStock });
   }
 
@@ -685,8 +699,12 @@ async function handleApi(req, res, pathname) {
     const amount = Number(qty);
     if (!sku || amount <= 0 || !fromStore || !toStore) return json(res, 400, { error: "Invalid transfer payload." });
     if (SUPABASE_URL) {
-      const products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,stock&limit=1`);
-      if (!products || !products.length) return json(res, 404, { error: "SKU not found." });
+      // Try SKU first, then name
+      let products = await sbQuery("products", "GET", null, `?sku=ilike.${encodeURIComponent(sku.trim())}&select=id,sku,stock&limit=1`);
+      if (!products || !products.length) {
+        products = await sbQuery("products", "GET", null, `?name=ilike.${encodeURIComponent(sku.trim())}&select=id,sku,stock&limit=1`);
+      }
+      if (!products || !products.length) return json(res, 404, { error: `Product "${sku}" not found.` });
       const product = products[0];
       if ((Number(product.stock) || 0) < amount) return json(res, 400, { error: `Insufficient stock. Available: ${product.stock}` });
       const newStock = (Number(product.stock) || 0) - amount;
@@ -695,16 +713,18 @@ async function handleApi(req, res, pathname) {
         headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", "Prefer": "return=minimal" },
         body: JSON.stringify({ stock: newStock })
       });
-      await sbQuery("stock_transfers", "POST", { sku: String(sku).trim(), qty: amount, from_store: String(fromStore).trim(), to_store: String(toStore).trim(), created_at: new Date().toISOString() });
+      await sbQuery("stock_transfers", "POST", { sku: product.sku, qty: amount, from_store: String(fromStore).trim(), to_store: String(toStore).trim(), created_at: new Date().toISOString() });
       return json(res, 200, { ok: true, newStock });
     }
     const dbx = getDb();
-    const product = dbx.prepare("SELECT id, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
-    if (!product) return json(res, 404, { error: "SKU not found." });
+    // Try SKU first, then name
+    let product = dbx.prepare("SELECT id, sku, stock FROM products WHERE lower(sku)=lower(?)").get(sku.trim());
+    if (!product) product = dbx.prepare("SELECT id, sku, stock FROM products WHERE lower(name)=lower(?)").get(sku.trim());
+    if (!product) return json(res, 404, { error: `Product "${sku}" not found.` });
     if ((Number(product.stock) || 0) < amount) return json(res, 400, { error: `Insufficient stock. Available: ${product.stock}` });
     const newStock = (Number(product.stock) || 0) - amount;
     dbx.prepare("UPDATE products SET stock = ? WHERE id=?").run(newStock, product.id);
-    dbx.prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)").run(String(sku).trim(), amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
+    dbx.prepare("INSERT INTO stock_transfers (sku, qty, from_store, to_store, created_at) VALUES (?, ?, ?, ?, ?)").run(product.sku, amount, String(fromStore).trim(), String(toStore).trim(), new Date().toISOString());
     return json(res, 200, { ok: true, newStock });
   }
 
@@ -1018,6 +1038,19 @@ async function handleApi(req, res, pathname) {
     } catch(e) { return json(res, 409, { error:"Category already exists." }); }
   }
 
+  // ── DELETE PRODUCT (admin only) ───────────────────────────────
+  if (pathname.startsWith("/api/products/") && req.method === "DELETE") {
+    if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
+    const productId = decodeURIComponent(pathname.replace("/api/products/", ""));
+    if (!productId) return json(res, 400, { error: "Product ID required." });
+    if (SUPABASE_URL) {
+      await sbQuery("products", "DELETE", null, `?id=eq.${encodeURIComponent(productId)}`);
+      return json(res, 200, { ok: true });
+    }
+    getDb().prepare("DELETE FROM products WHERE id=?").run(productId);
+    return json(res, 200, { ok: true });
+  }
+
   return false;
 }
 
@@ -1056,13 +1089,15 @@ async function initSqlite() {
   if (SUPABASE_URL) return; // skip if using Supabase
   const { DatabaseSync } = await import("node:sqlite");
   db = new DatabaseSync(join(ROOT, "novapos.db"));
+
+  // Step 1: Minimal CREATE TABLE — no complex columns so it never conflicts with old DBs
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
-    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, hsn_code TEXT NOT NULL, gst_rate REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
     CREATE TABLE IF NOT EXISTS tax_codes (id TEXT PRIMARY KEY, name TEXT NOT NULL, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, barcode TEXT UNIQUE, price REAL, wholesale_price REAL, retail_price REAL, mrp REAL, stock INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0, tax_code TEXT, category_id INTEGER);
-    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT);
-    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER, hsn_code TEXT, gst_rate REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT DEFAULT 'INR');
+    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, email TEXT);
     CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, supplier_id INTEGER, po_number TEXT, status TEXT, total REAL, created_at TEXT);
@@ -1071,13 +1106,34 @@ async function initSqlite() {
     CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT UNIQUE, loyalty_points INTEGER DEFAULT 0, member_discount REAL DEFAULT 0, credit_balance REAL DEFAULT 0);
   `);
 
+  // Step 2: Add every column that may be missing from old schemas (silent no-op if already exists)
   const ensureCol = (sql) => { try { db.exec(sql); } catch {} };
-  ensureCol("ALTER TABLE products ADD COLUMN barcode TEXT");
-  ensureCol("ALTER TABLE products ADD COLUMN wholesale_price REAL DEFAULT 0");
-  ensureCol("ALTER TABLE products ADD COLUMN retail_price REAL DEFAULT 0");
-  ensureCol("ALTER TABLE products ADD COLUMN mrp REAL DEFAULT 0");
-  ensureCol("ALTER TABLE products ADD COLUMN cess_rate REAL DEFAULT 0");
-  ensureCol("ALTER TABLE products ADD COLUMN tax_code TEXT");
+  ensureCol("ALTER TABLE categories ADD COLUMN hsn_code TEXT NOT NULL DEFAULT ''");
+  ensureCol("ALTER TABLE categories ADD COLUMN gst_rate  REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN barcode         TEXT");
+  ensureCol("ALTER TABLE products   ADD COLUMN wholesale_price REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN retail_price    REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN mrp             REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN cess_rate       REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN tax_code        TEXT");
+  ensureCol("ALTER TABLE products   ADD COLUMN hsn_code        TEXT DEFAULT ''");
+  ensureCol("ALTER TABLE products   ADD COLUMN gst_rate        REAL DEFAULT 0");
+  ensureCol("ALTER TABLE products   ADD COLUMN category_id     INTEGER");
+  ensureCol("ALTER TABLE sale_items ADD COLUMN hsn_code        TEXT DEFAULT ''");
+  ensureCol("ALTER TABLE sale_items ADD COLUMN gst_rate        REAL DEFAULT 0");
+
+  // Step 3: Backfill NULLs so all rows are usable
+  db.exec("UPDATE products  SET barcode         = sku   WHERE barcode         IS NULL OR barcode         = ''");
+  db.exec("UPDATE products  SET hsn_code        = ''    WHERE hsn_code        IS NULL");
+  db.exec("UPDATE products  SET gst_rate        = 0     WHERE gst_rate        IS NULL");
+  db.exec("UPDATE products  SET cess_rate       = 0     WHERE cess_rate       IS NULL");
+  db.exec("UPDATE products  SET retail_price    = price WHERE retail_price    IS NULL OR retail_price    = 0");
+  db.exec("UPDATE products  SET wholesale_price = ROUND(price / 1.18, 2) WHERE wholesale_price IS NULL OR wholesale_price = 0");
+  db.exec("UPDATE products  SET mrp             = price WHERE mrp             IS NULL OR mrp             = 0");
+  db.exec("UPDATE sale_items SET hsn_code = '' WHERE hsn_code IS NULL");
+  db.exec("UPDATE sale_items SET gst_rate = 0  WHERE gst_rate IS NULL");
+  db.exec("UPDATE categories SET hsn_code = '' WHERE hsn_code IS NULL");
+  db.exec("UPDATE categories SET gst_rate = 0  WHERE gst_rate IS NULL");
 
   for (const t of DEFAULT_TAX_CODES) {
     db.prepare("INSERT OR IGNORE INTO tax_codes (id, name, gst_rate, cess_rate) VALUES (?, ?, ?, ?)").run(t.id, t.name, t.gst_rate, t.cess_rate);
@@ -1108,12 +1164,9 @@ async function initSqlite() {
       [crypto.randomUUID(),"Chocolate Bar","CH-80",   "CH-80",   1.25,1.06,1.25,1.50, 8,"1905",18,0,"GST_18",1],
       [crypto.randomUUID(),"Orange Juice", "OJ-1L",   "OJ-1L",   3.90,3.31,3.90,4.50,12,"2202",18,0,"GST_18",2],
     ].forEach((row) => ins.run(...row));
+    console.log("🌱 Sample products seeded.");
   }
-  db.exec("UPDATE products SET barcode = COALESCE(barcode, sku)");
-  db.exec("UPDATE products SET wholesale_price = COALESCE(wholesale_price, round(price / (1 + (COALESCE(gst_rate,0)+COALESCE(cess_rate,0))/100.0), 2))");
-  db.exec("UPDATE products SET retail_price = COALESCE(retail_price, price)");
-  db.exec("UPDATE products SET mrp = CASE WHEN COALESCE(mrp,0) <= 0 THEN retail_price ELSE mrp END");
-  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'USD')").run();
+  db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('currency', 'INR')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'light')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('cashierName', '')").run();
   db.prepare("INSERT OR IGNORE INTO suppliers (id, name, phone, email) VALUES (1, 'Fresh Farms', '+911111111111', 'ops@freshfarms.test')").run();
@@ -1190,7 +1243,7 @@ async function initSupabase() {
 }
 
 // ── START ─────────────────────────────────────────────────────
-await initSqlite().catch((err) => console.warn("SQLite init skipped:", err.message));
+await initSqlite();
 await initSupabase();
 
 createServer(async (req, res) => {

@@ -643,20 +643,31 @@ function initAdminTabs() {
 // ── SKU AUTOCOMPLETE ──────────────────────────────────────────
 function refreshSkuList() {
   const dl = document.getElementById("skuList");
-  if (!dl) return;
-  dl.innerHTML = "";
-  state.products.forEach(p => {
-    // Option by SKU
-    const o1 = document.createElement("option");
-    o1.value = p.sku;
-    o1.label = p.name + " | " + money(p.price) + " | stock: " + p.stock;
-    dl.appendChild(o1);
-    // Option by name → auto-resolve to SKU on change
-    const o2 = document.createElement("option");
-    o2.value = p.name;
-    o2.label = "SKU: " + p.sku;
-    dl.appendChild(o2);
-  });
+  const dnl = document.getElementById("productNamesList");
+  if (dl) {
+    dl.innerHTML = "";
+    state.products.forEach(p => {
+      // Option by SKU
+      const o1 = document.createElement("option");
+      o1.value = p.sku;
+      o1.label = p.name + " | " + money(p.price) + " | stock: " + p.stock;
+      dl.appendChild(o1);
+      // Option by name → auto-resolve to SKU on change
+      const o2 = document.createElement("option");
+      o2.value = p.name;
+      o2.label = "SKU: " + p.sku;
+      dl.appendChild(o2);
+    });
+  }
+  // Populate product names list for the Add Product form
+  if (dnl) {
+    dnl.innerHTML = "";
+    state.products.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.name;
+      dnl.appendChild(o);
+    });
+  }
   // Auto-resolve name → SKU and show current price hint
   ["priceSku","adjustSku","poSku","transferSku","batchSku"].forEach(id => {
     const el = document.getElementById(id);
@@ -706,30 +717,17 @@ function renderInventoryTable() {
       <td>${money(Number(p.mrp ?? p.retail_price ?? p.price ?? 0))}</td>
       <td><span style="background:${gc}20;color:${gc};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">GST ${p.gst_rate||0}%${(p.cess_rate||0)>0 ? ` + Cess ${p.cess_rate}%` : ""}</span></td>
       <td style="font-weight:600;color:${low ? "var(--danger)" : "var(--text)"}">${p.stock}${low ? " ⚠️" : ""}</td>
-      <td><button class="btn ghost" style="padding:0.2rem 0.45rem;font-size:0.74rem"
-          onclick="inlineEditPrice('${p.id}','${p.sku}',${Number(p.retail_price ?? p.price ?? 0)})">✏️</button></td>
+      <td><button class="btn danger" style="padding:0.2rem 0.45rem;font-size:0.74rem"
+          onclick="deleteProduct('${p.id}','${p.name.replace(/'/g,"\\'")}')">🗑️</button></td>
     `;
     body.appendChild(tr);
   });
 }
 
-function inlineEditPrice(id, sku, cur) {
-  const cell = document.getElementById("pc-" + id);
-  if (!cell) return;
-  cell.innerHTML = `<div style="display:flex;gap:4px;align-items:center">
-    <input type="number" id="ip-${id}" value="${cur}" min="0" step="0.01"
-      style="width:74px;border:1px solid var(--primary);border-radius:5px;padding:2px 5px;font:inherit;font-size:0.8rem;background:var(--surface);color:var(--text)" />
-    <button class="btn" style="padding:2px 7px;font-size:0.74rem" onclick="submitInlinePrice('${id}','${sku}')">✓</button>
-    <button class="btn ghost" style="padding:2px 6px;font-size:0.74rem" onclick="renderInventoryTable()">✕</button>
-  </div>`;
-  document.getElementById("ip-" + id)?.focus();
-}
-
-async function submitInlinePrice(id, sku) {
-  const v = Number(document.getElementById("ip-" + id)?.value);
-  if (!v || v <= 0) { alert("Enter a valid price."); return; }
+async function deleteProduct(id, name) {
+  if (!confirm(`Delete "${name}"?\n\nThis cannot be undone. All sales history referencing this product is kept.`)) return;
   try {
-    await api(`/api/products/${encodeURIComponent(sku)}/price`, { method:"PATCH", body:JSON.stringify({ price:v }) });
+    await api(`/api/products/${encodeURIComponent(id)}`, { method: "DELETE" });
     await loadBootstrap();
     renderInventoryTable();
   } catch(e) { alert("❌ " + e.message); }
@@ -826,84 +824,41 @@ function onCategoryChange() {
   } else {
     if (hEl) { hEl.value = ""; hEl.readOnly = false; hEl.style.opacity = "1"; }
   }
-  recalcRetailPreview();
+  recalcRetailPreview(true);
 }
 
-function renderTaxCodeOptions() {
-  const sel = document.getElementById("productTaxCode");
-  if (!sel) return;
-  const current = sel.value;
-  sel.innerHTML = "";
-  const list = state.taxCodes?.length ? state.taxCodes : [
-    { id: "GST_5", name: "GST 5%", gst_rate: 5, cess_rate: 0 },
-    { id: "GST_12", name: "GST 12%", gst_rate: 12, cess_rate: 0 },
-    { id: "GST_18", name: "GST 18%", gst_rate: 18, cess_rate: 0 },
-    { id: "GST_28", name: "GST 28%", gst_rate: 28, cess_rate: 0 },
-    { id: "GST_28_CESS12", name: "GST 28% + Cess 12%", gst_rate: 28, cess_rate: 12 },
-  ];
-  list.forEach(t => {
-    const o = document.createElement("option");
-    o.value = t.id;
-    o.textContent = `${t.name} (GST ${t.gst_rate}% + Cess ${t.cess_rate||0}%)`;
-    sel.appendChild(o);
-  });
-  sel.value = current || (list.find(x => Number(x.gst_rate)===18 && Number(x.cess_rate||0)===0)?.id || list[0]?.id || "");
-  syncTaxCodeDetails();
-}
 
-function syncTaxCodeDetails() {
-  const selectedId = document.getElementById("productTaxCode")?.value;
-  const tax = (state.taxCodes || []).find(t => String(t.id) === String(selectedId));
-  const gst = Number(tax?.gst_rate || 0);
-  const cess = Number(tax?.cess_rate || 0);
-  const gstSel = document.getElementById("productGst");
-  if (gstSel) {
-    gstSel.innerHTML = `<option value="${gst}">GST ${gst}% + Cess ${cess}%</option>`;
-    gstSel.value = String(gst);
-  }
-  recalcRetailPreview();
-}
-
-function recalcRetailPreview() {
+function recalcRetailPreview(autoFill = false) {
   const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
   const mrp       = Number(document.getElementById("productMrp")?.value || 0);
-  // Get GST from category if selected, else from manual select
   const catId = document.getElementById("productCategory")?.value;
   const cat   = state.categories.find(c => String(c.id) === String(catId));
   const gst   = cat ? Number(cat.gst_rate || 0) : Number(document.getElementById("productGst")?.value || 0);
   const suggested = +(wholesale + (wholesale * gst / 100)).toFixed(2);
   const retailInput = document.getElementById("productRetail");
-  // Auto-fill only if retail is currently empty
-  if (retailInput && !retailInput.value) {
+  // Auto-fill only when explicitly triggered (blur or category/GST change) AND field is still empty
+  if (autoFill && retailInput && !retailInput.value && suggested > 0) {
     retailInput.value = suggested.toFixed(2);
   }
-  const retail = Number(retailInput?.value || suggested);
+  const retail = Number(retailInput?.value || 0);
   const preview = document.getElementById("pricingPreview");
-  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)} | Retail ₹${retail.toFixed(2)}`;
+  if (preview) {
+    if (wholesale > 0) {
+      preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)}${retail ? ` | Retail ₹${retail.toFixed(2)}` : " — leave Wholesale field to auto-fill Retail"}`;
+    } else {
+      preview.textContent = "Enter wholesale price to see suggestion";
+    }
+  }
   const err = document.getElementById("pricingError");
   if (err) {
-    if (mrp > 0 && retail > mrp) err.textContent = "⚠️ Retail price cannot exceed MRP.";
-    else if (retail > 0 && retail < wholesale) err.textContent = "⚠️ Retail price must be >= wholesale price.";
+    if (retail > 0 && mrp > 0 && retail > mrp) err.textContent = "⚠️ Retail price cannot exceed MRP.";
+    else if (retail > 0 && wholesale > 0 && retail < wholesale) err.textContent = "⚠️ Retail price must be >= wholesale price.";
     else err.textContent = "";
   }
 }
 
 function updatePricingPreview() {
-  const wholesale = Number(document.getElementById("productWholesale")?.value || 0);
-  const retail    = Number(document.getElementById("productRetail")?.value || 0);
-  const mrp       = Number(document.getElementById("productMrp")?.value || 0);
-  const catId     = document.getElementById("productCategory")?.value;
-  const cat       = state.categories.find(c => String(c.id) === String(catId));
-  const gst       = cat ? Number(cat.gst_rate || 0) : Number(document.getElementById("productGst")?.value || 0);
-  const suggested = +(wholesale + (wholesale * gst / 100)).toFixed(2);
-  const preview = document.getElementById("pricingPreview");
-  if (preview) preview.textContent = `Wholesale ₹${wholesale.toFixed(2)} + GST ${gst}% = Suggested ₹${suggested.toFixed(2)} | Retail ₹${retail.toFixed(2)}`;
-  const err = document.getElementById("pricingError");
-  if (err) {
-    if (mrp > 0 && retail > mrp) err.textContent = "⚠️ Retail price cannot exceed MRP.";
-    else if (retail > 0 && retail < wholesale) err.textContent = "⚠️ Retail price must be >= wholesale price.";
-    else err.textContent = "";
-  }
+  recalcRetailPreview(false); // user is typing retail manually — just update preview/errors
 }
 
 function renderCategoriesTable() {
@@ -948,10 +903,10 @@ function init() {
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
   document.getElementById("checkoutForm")?.addEventListener("submit",completeSale);
   document.getElementById("productForm")?.addEventListener("submit",addProduct);
-  document.getElementById("productTaxCode")?.addEventListener("change", recalcRetailPreview);
-  document.getElementById("productGst")?.addEventListener("change", () => { document.getElementById("productRetail").value=""; recalcRetailPreview(); });
+  document.getElementById("productGst")?.addEventListener("change", () => { document.getElementById("productRetail").value=""; recalcRetailPreview(true); });
   document.getElementById("productRetail")?.addEventListener("input", updatePricingPreview);
-  document.getElementById("productWholesale")?.addEventListener("input", recalcRetailPreview);
+  document.getElementById("productWholesale")?.addEventListener("input", () => recalcRetailPreview(false));
+  document.getElementById("productWholesale")?.addEventListener("blur",  () => recalcRetailPreview(true));
   document.getElementById("productMrp")?.addEventListener("input", recalcRetailPreview);
   document.getElementById("priceForm")?.addEventListener("submit",updatePrice);
   document.getElementById("clearHistoryBtn")?.addEventListener("click",clearHistory);

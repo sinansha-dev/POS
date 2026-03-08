@@ -141,6 +141,8 @@
 
   <!-- SKU datalist for autocomplete -->
   <datalist id="skuList"></datalist>
+  <!-- Product names datalist for Add Product form -->
+  <datalist id="productNamesList"></datalist>
 
   <!-- ═══════════════════════════════════════════════════════════
        ADMIN DASHBOARD — fullscreen overlay, Supabase-style
@@ -216,8 +218,8 @@
               <div class="pane-card">
                 <div class="pane-card-title">➕ Add New Product</div>
                 <form id="productForm">
-                  <div class="field"><span>Product Name</span><input id="productName" type="text" placeholder="e.g. Coca Cola 500ml" required /></div>
-                  <div class="field"><span>Barcode / SKU</span><input id="productSku" type="text" placeholder="e.g. SKU-001" required /></div>
+                  <div class="field"><span>Product Name</span><input id="productName" type="text" placeholder="e.g. Coca Cola 500ml" required autocomplete="off" list="productNamesList" /></div>
+                  <div class="field"><span>Barcode / SKU</span><input id="productSku" type="text" placeholder="e.g. SKU-001" required autocomplete="off" list="skuList" /></div>
 
                   <div class="field">
                     <span>Category <small style="color:var(--primary);font-weight:600">(auto-fills HSN &amp; GST ↓)</small></span>
@@ -299,7 +301,7 @@
               </div>
               <div class="pane-table-wrap">
                 <table>
-                  <thead><tr><th>Product</th><th>HSN</th><th>Cost Price</th><th>Retail Price</th><th>MRP</th><th>GST</th><th>Stock</th><th>Edit</th></tr></thead>
+                  <thead><tr><th>Product</th><th>HSN</th><th>Cost Price</th><th>Retail Price</th><th>MRP</th><th>GST</th><th>Stock</th><th>Delete</th></tr></thead>
                   <tbody id="inventoryTableBody"></tbody>
                 </table>
               </div>
