@@ -185,6 +185,12 @@
         <button class="admin-tab" data-tab="users">
           <span class="tab-icon">👥</span><span class="tab-label">User Management</span>
         </button>
+        <button class="admin-tab" data-tab="z-report">
+          <span class="tab-icon">📋</span><span class="tab-label">EOD Z-Report</span>
+        </button>
+        <button class="admin-tab" data-tab="audit-log">
+          <span class="tab-icon">🔍</span><span class="tab-label">Audit Log</span>
+        </button>
       </div>
 
       <div class="sidebar-bottom">
@@ -244,13 +250,14 @@
                   </div>
 
                   <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
-                    <div class="field"><span>Wholesale / Cost Price (₹)</span><input id="productWholesale" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
+                    <div class="field"><span>Wholesale / Buy Price (₹)</span><input id="productWholesale" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
                     <div class="field">
                       <span>Retail Price (₹) <small style="color:var(--primary)">(editable)</small></span>
                       <input id="productRetail" type="number" min="0" step="0.01" placeholder="Auto-fills from Wholesale + GST" />
                     </div>
                   </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
+                    <div class="field"><span>Cost Price (₹) <small style="color:var(--muted)">for COGS</small></span><input id="productCostPrice" type="number" min="0" step="0.01" placeholder="= Wholesale if blank" /></div>
                     <div class="field"><span>MRP (₹) <small style="color:var(--muted)">(can equal Retail)</small></span><input id="productMrp" type="number" min="0" step="0.01" placeholder="0.00 = same as Retail" /></div>
                     <div class="field"><span>Initial Stock</span><input id="productStock" type="number" min="0" step="1" placeholder="0" required /></div>
                   </div>
@@ -261,14 +268,36 @@
               </div>
 
               <div class="pane-card">
-                <div class="pane-card-title">💰 Update Price</div>
-                <p class="pane-card-hint">Type SKU or product name — suggestions appear automatically</p>
+                <div class="pane-card-title">💰 Update Pricing</div>
+                <p class="pane-card-hint">
+                  Two separate prices, two separate purposes:<br>
+                  <strong>Selling price</strong> — what the customer pays at checkout.<br>
+                  <strong>Cost price</strong> — what you paid the supplier; used only for COGS and profit reports, never shown to customers.
+                </p>
+
+                <p style="font-size:0.78rem;font-weight:700;color:var(--primary);margin:0.75rem 0 0.25rem;text-transform:uppercase;letter-spacing:0.04em">Selling Price (customer-facing)</p>
                 <form id="priceForm">
-                  <div class="field"><span>SKU or Product Name</span>
-                    <input id="priceSku" type="text" placeholder="Start typing..." required autocomplete="off" list="skuList" />
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                    <div class="field"><span>SKU or Product Name</span>
+                      <input id="priceSku" type="text" placeholder="Start typing..." required autocomplete="off" list="skuList" />
+                    </div>
+                    <div class="field"><span>New Selling Price (₹)</span><input id="newPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
                   </div>
-                  <div class="field"><span>New Price</span><input id="newPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
-                  <button class="btn" type="submit" style="width:100%;margin-top:0.4rem">💰 Update Price</button>
+                  <div class="field"><span>Reason</span><input id="priceReason" type="text" placeholder="e.g. Price revision, promo" /></div>
+                  <button class="btn" type="submit" style="width:100%;margin-top:0.25rem">💰 Update Selling Price</button>
+                </form>
+
+                <hr style="border:none;border-top:1px solid var(--border);margin:1rem 0" />
+
+                <p style="font-size:0.78rem;font-weight:700;color:var(--muted);margin:0 0 0.25rem;text-transform:uppercase;letter-spacing:0.04em">Cost Price (internal — COGS &amp; profit only)</p>
+                <form id="costPriceForm">
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
+                    <div class="field"><span>SKU</span><input id="costSku" type="text" placeholder="Start typing..." required autocomplete="off" list="skuList" /></div>
+                    <div class="field"><span>Cost Price (₹)</span><input id="costPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
+                    <div class="field"><span>Batch qty <small style="color:var(--muted)">(0 = no batch)</small></span><input id="costQty" type="number" min="0" value="0" /></div>
+                  </div>
+                  <div class="field"><span>Reason</span><input id="costReason" type="text" placeholder="e.g. New PO received" /></div>
+                  <button class="btn ghost" type="submit" style="width:100%;margin-top:0.25rem">🏷️ Update Cost Price</button>
                 </form>
               </div>
 
@@ -463,11 +492,20 @@
         <!-- ── REPORTS ── -->
         <div class="admin-pane" id="tab-reports">
           <div class="pane-body">
+            <div class="pane-card" style="margin-bottom:1rem">
+              <div class="pane-card-title">📅 Date Range Filter</div>
+              <form id="reportDateForm" style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap">
+                <label class="field" style="margin:0;flex:1;min-width:140px"><span>From</span><input id="reportFrom" type="date" /></label>
+                <label class="field" style="margin:0;flex:1;min-width:140px"><span>To</span><input id="reportTo" type="date" /></label>
+                <button class="btn" type="submit" style="padding:0.45rem 1.2rem">Apply</button>
+                <button class="btn ghost" type="button" style="padding:0.45rem 1.2rem" onclick="document.getElementById('reportFrom').value='';document.getElementById('reportTo').value='';state.reportRange={from:null,to:null};loadReports()">Clear</button>
+              </form>
+            </div>
             <div class="reports-grid">
               <article><h4>Daily Sales</h4><ul id="dailySalesReport"></ul></article>
               <article><h4>Monthly Revenue</h4><ul id="monthlyRevenueReport"></ul></article>
-              <article><h4>Profit & Loss</h4><pre id="profitLossReport"></pre></article>
-              <article><h4>Best Selling</h4><ul id="bestSellingReport"></ul></article>
+              <article><h4>Profit &amp; Loss</h4><pre id="profitLossReport"></pre></article>
+              <article><h4>Best Selling (+ COGS)</h4><ul id="bestSellingReport"></ul></article>
               <article><h4>Slow Moving (Last 30 days)</h4><ul id="slowMovingReport"></ul></article>
               <article><h4>Cash Register Summary</h4><ul id="cashSummaryReport"></ul></article>
               <article><h4>Tax Report (GST)</h4><ul id="taxReport"></ul></article>
@@ -499,6 +537,60 @@
                 <table><thead><tr><th>Username</th><th>Role</th><th>Reset</th><th>Delete</th></tr></thead>
                 <tbody id="usersTableBody"></tbody></table>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Z-REPORT ── -->
+        <div class="admin-pane" id="tab-z-report">
+          <div class="pane-body two-col">
+            <div class="pane-card">
+              <div class="pane-card-title">📋 Close Day (EOD Z-Report)</div>
+              <p class="pane-card-hint">Summarises all sales since the last Z-report. Captures cash reconciliation and locks the period. Cannot be undone.</p>
+              <form id="zReportForm">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
+                  <div class="field"><span>Opening Cash (₹)</span><input id="zOpeningCash" type="number" min="0" step="0.01" value="0" placeholder="0.00" /></div>
+                  <div class="field"><span>Closing Cash (₹)</span><input id="zClosingCash" type="number" min="0" step="0.01" value="0" placeholder="0.00" /></div>
+                </div>
+                <div class="field"><span>Notes (optional)</span><input id="zNotes" type="text" placeholder="e.g. Bank drop ₹5000" /></div>
+                <button class="btn" type="submit" style="width:100%;margin-top:0.4rem;background:#6366f1">📋 Generate Z-Report &amp; Close Day</button>
+              </form>
+            </div>
+            <div class="pane-card">
+              <div class="pane-card-title">Past Z-Reports</div>
+              <div class="pane-table-wrap">
+                <table>
+                  <thead><tr><th>Date</th><th>Time</th><th>Cashier</th><th>Txns</th><th>Sales</th><th>Cash/Card</th><th>Refunds</th><th>GST</th><th>Notes</th></tr></thead>
+                  <tbody id="zReportTableBody"><tr><td colspan="9" style="color:var(--muted);text-align:center;padding:1rem">Loading…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── AUDIT LOG ── -->
+        <div class="admin-pane" id="tab-audit-log">
+          <div class="pane-body">
+            <div class="pane-card" style="margin-bottom:1rem">
+              <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+                <div class="pane-card-title" style="margin:0">🔍 Audit Log</div>
+                <label class="field compact" style="margin:0;min-width:180px">
+                  <span>Filter by type</span>
+                  <select id="auditEntityFilter">
+                    <option value="">All events</option>
+                    <option value="sale">Sales</option>
+                    <option value="product">Products</option>
+                    <option value="z_report">Z-Reports</option>
+                  </select>
+                </label>
+                <button class="btn ghost" type="button" onclick="loadAuditLog()" style="padding:0.35rem 1rem">↺ Refresh</button>
+              </div>
+            </div>
+            <div class="pane-table-wrap">
+              <table>
+                <thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Entity</th><th>Change</th><th>Note</th></tr></thead>
+                <tbody id="auditLogTableBody"><tr><td colspan="6" style="color:var(--muted);text-align:center;padding:1rem">Loading…</td></tr></tbody>
+              </table>
             </div>
           </div>
         </div>

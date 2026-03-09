@@ -3,7 +3,9 @@ const state = {
   products: [], cart: [], history: [], categories: [],
   currentUser: null, currency: "USD", theme: "light",
   heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
-  customers: [], suppliers: [], reports: {}, taxCodes: []
+  customers: [], suppliers: [], reports: {}, taxCodes: [],
+  saleKey: crypto.randomUUID(), // idempotency key — regenerated after each sale
+  reportRange: { from: null, to: null }, // persists active date filter across bootstrap reloads
 };
 
 const productGrid    = document.getElementById("productGrid");
@@ -122,7 +124,7 @@ async function loadBootstrap() {
   currencySelect.value = state.currency;
   applyTheme();
   renderProducts(); renderHistory(); renderCart(); renderKpis(); renderCustomers(); renderSuppliersTable(); renderInventoryTable(); refreshSkuList(); renderCategoryOptions(); renderCategoriesTable();
-  await loadReports();
+  await loadReports(state.reportRange.from, state.reportRange.to);
   if (state.currentUser?.role === "admin") await loadUsers();
 }
 
@@ -223,8 +225,16 @@ async function processRefund(receiptNo, reason) {
 }
 
 let chartInstance = null;
-async function loadReports() {
-  try { const data = await api("/api/reports"); if (data.reports) state.reports = data.reports; } catch {}
+async function loadReports(fromDate = null, toDate = null) {
+  try {
+    let url = "/api/reports";
+    const params = [];
+    if (fromDate) params.push(`from=${fromDate}`);
+    if (toDate)   params.push(`to=${toDate}`);
+    if (params.length) url += "?" + params.join("&");
+    const data = await api(url);
+    if (data.reports) state.reports = data.reports;
+  } catch {}
   renderReports();
 }
 
@@ -241,11 +251,15 @@ function renderReports() {
     `<li style="display:flex;justify-content:space-between;padding:0.35rem 0;border-bottom:1px solid var(--border)"><span style="font-size:0.83rem">${m.month}</span><strong>${money(m.revenue)}</strong></li>`);
 
   const plEl = document.getElementById("profitLossReport");
-  if (plEl) { const p = r.profitLoss||{}; plEl.textContent = `Revenue:        ${money(p.revenue||0)}\nCost of Goods:  ${money(p.cogs||0)}\n─────────────────────────\nGross Profit:   ${money(p.grossProfit||0)}\nStock Value:    ${money(p.stockValue||0)}`; }
+  if (plEl) {
+    const p = r.profitLoss||{};
+    const range = r.range?.from ? ` (${r.range.from} → ${r.range.to||"today"})` : " (All time)";
+    plEl.textContent = `${range}\nRevenue:        ${money(p.revenue||0)}\nCost of Goods:  ${money(p.cogs||0)}\n─────────────────────────\nGross Profit:   ${money(p.grossProfit||0)}\nStock Value:    ${money(p.stockValue||0)}`;
+  }
 
   const bestEl = document.getElementById("bestSellingReport");
   if (bestEl) bestEl.innerHTML = listHtml((r.bestSelling||[]).slice(0,8), (p,i) =>
-    `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${i+1}. ${p.name}</span><strong style="color:var(--success)">${p.qty} sold</strong></li>`);
+    `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${i+1}. ${p.name}</span><span style="text-align:right"><strong style="color:var(--success)">${p.qty} sold</strong>${p.cogs ? `<br><small style="color:var(--muted)">COGS ${money(p.cogs)}</small>` : ""}</span></li>`);
 
   const slowEl = document.getElementById("slowMovingReport");
   if (slowEl) slowEl.innerHTML = listHtml((r.slowMoving||[]).slice(0,10), p =>
@@ -402,12 +416,51 @@ async function completeSale(event) {
   event.preventDefault();
   if (!state.currentUser) { alert("Please login first."); return; }
   if (!state.cart.length) { alert("Cart is empty."); return; }
-  const totals = saleTotals();
-  if (totals.received < totals.total) { alert("Amount received is less than total."); return; }
+
+  const discountPct = Number(document.getElementById("discount")?.value || 0);
+  const pm = document.getElementById("paymentMethod")?.value;
+  const clientTotals = saleTotals();
+
+  // For Card / Mobile Wallet: the exact amount is always charged — auto-fill
+  // received so cashier doesn't need to type in the figure manually.
+  if (pm === "Card" || pm === "Mobile Wallet") {
+    const amtEl = document.getElementById("amountReceived");
+    if (amtEl && Number(amtEl.value) <= 0) amtEl.value = clientTotals.total.toFixed(2);
+  }
+
+  const splitTotal = ["splitCash","splitCard","splitWallet"].reduce((s, id) => s + Number(document.getElementById(id)?.value || 0), 0);
+  const received = pm === "Split" ? splitTotal : Number(document.getElementById("amountReceived")?.value || 0);
+
+  if (received < clientTotals.total - 0.01) { alert("Amount received is less than total."); return; }
+
   try {
-    const sale = await api("/api/sales", { method:"POST", body:JSON.stringify({ paymentMethod:document.getElementById("paymentMethod")?.value, subtotal:totals.subtotal, discount:totals.discountAmount, tax:totals.taxAmount, total:totals.total, received:totals.received, change:totals.change, currency:state.currency, items:state.cart }) });
-    receiptContent.textContent = buildReceipt(sale, totals);
-    state.cart = []; document.getElementById("amountReceived").value = "0";
+    const sale = await api("/api/sales", { method: "POST", body: JSON.stringify({
+      idempotencyKey: state.saleKey,
+      paymentMethod:  pm,
+      discountPct,
+      received,
+      currency:       state.currency,
+      items:          state.cart.map(i => ({
+        productId: i.productId,
+        qty:       i.qty,
+        saleType:  i.saleType || "retail",
+      })),
+    })});
+
+    // Use server-authoritative totals for the receipt
+    const serverTotals = {
+      subtotal:       sale.subtotal       ?? clientTotals.subtotal,
+      discountAmount: sale.discount       ?? clientTotals.discountAmount,
+      taxAmount:      sale.tax            ?? clientTotals.taxAmount,
+      total:          sale.total          ?? clientTotals.total,
+      received,
+      change:         Math.max(received - (sale.total ?? clientTotals.total), 0),
+    };
+
+    receiptContent.textContent = buildReceipt(sale, serverTotals);
+    state.cart    = [];
+    state.saleKey = crypto.randomUUID(); // rotate idempotency key for next sale
+    document.getElementById("amountReceived").value = "0";
     await loadBootstrap();
   } catch (err) { alert("Sale failed: " + err.message); }
 }
@@ -416,12 +469,12 @@ async function addProduct(event) {
   event.preventDefault();
   const catId  = document.getElementById("productCategory")?.value;
   const cat    = state.categories.find(c => String(c.id) === String(catId));
-  // GST comes from category if selected, otherwise from the manual GST select
   const gstRate  = Number(cat ? cat.gst_rate : (document.getElementById("productGst")?.value || 0));
-  const cessRate = 0; // cess only if manually needed — keep simple
+  const cessRate = 0;
   const wholesalePrice = Number(document.getElementById("productWholesale")?.value || 0);
   const retailPrice    = Number(document.getElementById("productRetail")?.value || 0);
   const mrp            = Number(document.getElementById("productMrp")?.value || 0);
+  const costPrice      = Number(document.getElementById("productCostPrice")?.value || 0) || wholesalePrice;
   const hsnCode        = (cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "");
   if (wholesalePrice <= 0) { alert("Wholesale price must be greater than 0."); return; }
   if (retailPrice <= 0)    { alert("Retail price must be greater than 0."); return; }
@@ -434,6 +487,7 @@ async function addProduct(event) {
       barcode:  document.getElementById("productSku").value.trim(),
       wholesalePrice,
       retailPrice,
+      costPrice,
       mrp: mrp || retailPrice,
       stock:    Number(document.getElementById("productStock").value),
       hsnCode,
@@ -448,8 +502,16 @@ async function addProduct(event) {
 }
 async function updatePrice(event) {
   event.preventDefault();
-  try { await api(`/api/products/${encodeURIComponent(document.getElementById("priceSku").value.trim())}/price`,{method:"PATCH",body:JSON.stringify({price:Number(document.getElementById("newPrice").value)})}); event.target.reset(); await loadBootstrap(); }
-  catch(err){alert(err.message);}
+  const sku    = document.getElementById("priceSku").value.trim();
+  const price  = Number(document.getElementById("newPrice").value);
+  const reason = document.getElementById("priceReason")?.value?.trim() || "";
+  try {
+    await api(`/api/products/${encodeURIComponent(sku)}/price`, {
+      method: "PATCH", body: JSON.stringify({ price, reason })
+    });
+    event.target.reset();
+    await loadBootstrap();
+  } catch(err) { alert(err.message); }
 }
 
 async function addSupplier(event) {
@@ -599,7 +661,9 @@ const TAB_LABELS = {
   "customers":       "Customers",
   "reports":         "Reports",
   "gst-categories":  "GST Categories",
-  "users":           "User Management"
+  "users":           "User Management",
+  "z-report":        "EOD Z-Report",
+  "audit-log":       "Audit Log",
 };
 
 function openAdminDashboard() {
@@ -636,6 +700,9 @@ function initAdminTabs() {
       const b = document.getElementById("adminPaneBreadcrumb");
       if (t) t.textContent = label;
       if (b) b.textContent = label;
+      // Lazy-load data for tabs that need fresh server data
+      if (key === "z-report")  loadZReports();
+      if (key === "audit-log") loadAuditLog();
     });
   });
 }
@@ -709,10 +776,11 @@ function renderInventoryTable() {
     const tr = document.createElement("tr");
     const gstTotal = Number(p.gst_rate || 0) + Number(p.cess_rate || 0);
     const gc = gstTotal >= 18 ? "var(--danger)" : gstTotal > 0 ? "var(--primary)" : "var(--success)";
+    const costDisplay = Number(p.cost_price || p.wholesale_price || p.price || 0);
     tr.innerHTML = `
       <td><strong>${p.name}</strong></td>
       <td style="font-family:monospace;font-size:0.8rem">${p.hsn_code||"—"}</td>
-      <td>${money(Number(p.wholesale_price ?? p.price ?? 0))}</td>
+      <td>${money(costDisplay)}</td>
       <td id="pc-${p.id}">${money(Number(p.retail_price ?? p.price ?? 0))}</td>
       <td>${money(Number(p.mrp ?? p.retail_price ?? p.price ?? 0))}</td>
       <td><span style="background:${gc}20;color:${gc};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">GST ${p.gst_rate||0}%${(p.cess_rate||0)>0 ? ` + Cess ${p.cess_rate}%` : ""}</span></td>
@@ -898,6 +966,117 @@ async function addCategory(event) {
 }
 
 
+// ── DATE RANGE REPORTS ─────────────────────────────────────────
+async function applyReportDateRange(event) {
+  if (event) event.preventDefault();
+  const from = document.getElementById("reportFrom")?.value || null;
+  const to   = document.getElementById("reportTo")?.value   || null;
+  state.reportRange = { from, to };
+  await loadReports(from, to);
+}
+
+// ── Z-REPORT ──────────────────────────────────────────────────
+async function loadZReports() {
+  try {
+    const data = await api("/api/z-report");
+    renderZReports(data.zReports || []);
+  } catch(e) { console.warn("Z-report load failed:", e.message); }
+}
+
+function renderZReports(reports) {
+  const body = document.getElementById("zReportTableBody");
+  if (!body) return;
+  if (!reports.length) {
+    body.innerHTML = "<tr><td colspan='9' style='color:var(--muted);text-align:center;padding:1rem'>No Z-reports yet. Close the day to generate the first one.</td></tr>";
+    return;
+  }
+  body.innerHTML = "";
+  reports.forEach(r => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td style="font-family:monospace;font-size:0.8rem">${r.report_date}</td>
+      <td style="font-size:0.78rem;color:var(--muted)">${new Date(r.closed_at).toLocaleTimeString("en-IN")}</td>
+      <td>${r.cashier}</td>
+      <td>${r.transaction_count}</td>
+      <td style="font-weight:600">${money(r.total_sales)}</td>
+      <td style="color:var(--muted)">${money(r.cash_sales)} / ${money(r.card_sales)}</td>
+      <td style="color:var(--danger)">${money(r.total_refunds)}</td>
+      <td style="color:var(--primary)">${money(r.total_tax)}</td>
+      <td style="font-size:0.75rem;color:var(--muted)">${r.notes||"—"}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function closeDay(event) {
+  event.preventDefault();
+  const openingCash = Number(document.getElementById("zOpeningCash")?.value || 0);
+  const closingCash = Number(document.getElementById("zClosingCash")?.value || 0);
+  const notes       = document.getElementById("zNotes")?.value || "";
+  if (!confirm(`Close today's trading day?\n\nOpening cash: ${money(openingCash)}\nClosing cash:  ${money(closingCash)}\n\nThis action is permanent.`)) return;
+  try {
+    const data = await api("/api/z-report", { method: "POST", body: JSON.stringify({ openingCash, closingCash, notes }) });
+    const r = data.zReport;
+    alert(`✅ Z-Report Generated!\n\nDate:         ${r.report_date}\nTransactions: ${r.transaction_count}\nTotal Sales:  ${money(r.total_sales)}\n  • Cash:     ${money(r.cash_sales)}\n  • Card:     ${money(r.card_sales)}\n  • Mobile:   ${money(r.mobile_sales)}\nRefunds:      ${money(r.total_refunds)}\nGST Collected:${money(r.total_tax)}\nNet Cash:     ${money(closingCash - openingCash)}`);
+    event.target.reset();
+    await loadZReports();
+  } catch(e) { alert("❌ " + e.message); }
+}
+
+// ── AUDIT LOG ─────────────────────────────────────────────────
+async function loadAuditLog() {
+  const entity = document.getElementById("auditEntityFilter")?.value || null;
+  try {
+    let url = "/api/audit-log?limit=100";
+    if (entity) url += `&entity=${entity}`;
+    const data = await api(url);
+    renderAuditLog(data.auditLog || []);
+  } catch(e) { console.warn("Audit log load failed:", e.message); }
+}
+
+function renderAuditLog(rows) {
+  const body = document.getElementById("auditLogTableBody");
+  if (!body) return;
+  if (!rows.length) {
+    body.innerHTML = "<tr><td colspan='6' style='color:var(--muted);text-align:center;padding:1rem'>No audit events yet.</td></tr>";
+    return;
+  }
+  const ACTION_COLOR = { REFUND:"var(--danger)", PRICE_UPDATE:"var(--warning,#f59e0b)", STOCK_ADJUST:"var(--primary)", COST_UPDATE:"var(--primary)", Z_REPORT:"var(--success)" };
+  body.innerHTML = "";
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    const color = ACTION_COLOR[r.action] || "var(--text)";
+    let before = "", after = "";
+    try { before = r.before_value ? JSON.stringify(JSON.parse(r.before_value), null, 0).slice(0, 60) : "—"; } catch { before = r.before_value || "—"; }
+    try { after  = r.after_value  ? JSON.stringify(JSON.parse(r.after_value),  null, 0).slice(0, 80) : "—"; } catch { after  = r.after_value  || "—"; }
+    tr.innerHTML = `
+      <td style="font-size:0.78rem;color:var(--muted);font-family:monospace;white-space:nowrap">${new Date(r.timestamp).toLocaleString("en-IN")}</td>
+      <td style="font-weight:600">${r.actor}</td>
+      <td><span style="background:${color}20;color:${color};padding:1px 8px;border-radius:999px;font-weight:700;font-size:0.75rem">${r.action}</span></td>
+      <td style="font-size:0.8rem;color:var(--muted)">${r.entity_type}${r.entity_id ? ` · ${r.entity_id}` : ""}</td>
+      <td style="font-size:0.75rem;font-family:monospace;color:var(--muted)">${before} → ${after}</td>
+      <td style="font-size:0.78rem;color:var(--muted)">${r.note||"—"}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+// ── COST PRICE UPDATE (from inventory tab) ────────────────────
+async function updateCostPrice(event) {
+  event.preventDefault();
+  const sku       = document.getElementById("costSku")?.value?.trim();
+  const costPrice = Number(document.getElementById("costPrice")?.value || 0);
+  const qty       = Number(document.getElementById("costQty")?.value   || 0);
+  const reason    = document.getElementById("costReason")?.value?.trim() || "";
+  if (!sku || costPrice <= 0) { alert("SKU and a valid cost price are required."); return; }
+  try {
+    await api(`/api/products/${encodeURIComponent(sku)}/cost`, {
+      method: "PATCH", body: JSON.stringify({ costPrice, qty, reason })
+    });
+    event.target.reset();
+    await loadBootstrap();
+    alert(`✅ Cost price updated for "${sku}"!${qty > 0 ? `\nFIFO batch of ${qty} units seeded.` : ""}`);
+  } catch(e) { alert("❌ " + e.message); }
+}
+
 function init() {
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
   document.getElementById("logoutBtn")?.addEventListener("click",logout);
@@ -925,6 +1104,10 @@ function init() {
   document.getElementById("categoryForm")?.addEventListener("submit",addCategory);
   document.getElementById("productCategory")?.addEventListener("change",onCategoryChange);
   document.getElementById("inventorySearch")?.addEventListener("input", renderInventoryTable);
+  document.getElementById("reportDateForm")?.addEventListener("submit", applyReportDateRange);
+  document.getElementById("zReportForm")?.addEventListener("submit", closeDay);
+  document.getElementById("auditEntityFilter")?.addEventListener("change", loadAuditLog);
+  document.getElementById("costPriceForm")?.addEventListener("submit", updateCostPrice);
   initAdminTabs();
   barcodeInput?.addEventListener("keydown",handleBarcode);
   productSearch?.addEventListener("input",renderProducts);
