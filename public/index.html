@@ -287,18 +287,7 @@
                   <button class="btn" type="submit" style="width:100%;margin-top:0.25rem">💰 Update Selling Price</button>
                 </form>
 
-                <hr style="border:none;border-top:1px solid var(--border);margin:1rem 0" />
-
-                <p style="font-size:0.78rem;font-weight:700;color:var(--muted);margin:0 0 0.25rem;text-transform:uppercase;letter-spacing:0.04em">Cost Price (internal — COGS &amp; profit only)</p>
-                <form id="costPriceForm">
-                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
-                    <div class="field"><span>SKU</span><input id="costSku" type="text" placeholder="Start typing..." required autocomplete="off" list="skuList" /></div>
-                    <div class="field"><span>Cost Price (₹)</span><input id="costPrice" type="number" min="0" step="0.01" placeholder="0.00" required /></div>
-                    <div class="field"><span>Batch qty <small style="color:var(--muted)">(0 = no batch)</small></span><input id="costQty" type="number" min="0" value="0" /></div>
-                  </div>
-                  <div class="field"><span>Reason</span><input id="costReason" type="text" placeholder="e.g. New PO received" /></div>
-                  <button class="btn ghost" type="submit" style="width:100%;margin-top:0.25rem">🏷️ Update Cost Price</button>
-                </form>
+                <!-- Cost price is set on the product itself (Add New Product → Cost Price field) -->
               </div>
 
               <div class="pane-card">

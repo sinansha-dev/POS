@@ -1,11 +1,19 @@
-// ── STATE ─────────────────────────────────────────────────────
+// ── STATE ─────────────────────────────────────────────────────────────────────
 const state = {
-  products: [], cart: [], history: [], categories: [],
-  currentUser: null, currency: "INR", theme: "light",
-  heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
-  customers: [], suppliers: [], reports: {}, taxCodes: [],
-  saleKey: crypto.randomUUID(), // idempotency key — regenerated after each sale
-  reportRange: { from: null, to: null }, // persists active date filter across bootstrap reloads
+  products:    [],
+  cart:        [],
+  history:     [],
+  categories:  [],
+  currentUser: null,
+  currency:    "INR",
+  theme:       "light",
+  heldOrders:  JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
+  customers:   [],
+  suppliers:   [],
+  reports:     {},
+  taxCodes:    [],
+  saleKey:     crypto.randomUUID(), // regenerated after each sale
+  reportRange: { from: null, to: null },
 };
 
 const productGrid    = document.getElementById("productGrid");
@@ -145,11 +153,22 @@ function renderProducts() {
 }
 
 function addToCart(id) {
-  const product = state.products.find(p => p.id === id);
+  const product  = state.products.find(p => p.id === id);
   if (!product || product.stock <= 0) return;
   const existing = state.cart.find(i => i.productId === id);
-  if (existing) { if (existing.qty >= product.stock) { alert("Cannot exceed available stock."); return; } existing.qty++; }
-  else state.cart.push({ productId: id, name: product.name, price: product.price, qty: 1, hsnCode: product.hsn_code||null, gstRate: product.gst_rate||0 });
+  if (existing) {
+    if (existing.qty >= product.stock) { alert("Cannot exceed available stock."); return; }
+    existing.qty++;
+  } else {
+    state.cart.push({
+      productId: id,
+      name:      product.name,
+      price:     product.price,
+      qty:       1,
+      hsnCode:   product.hsn_code || null,
+      gstRate:   product.gst_rate || 0,
+    });
+  }
   renderCart();
 }
 function removeFromCart(productId) { state.cart = state.cart.filter(l => l.productId !== productId); renderCart(); }
@@ -583,9 +602,26 @@ async function addCustomer(event) {
   catch(err){alert(String(err.message).includes("SQLite")?"Customer DB works when running locally.":err.message);}
 }
 
-async function persistSettings(partial) { try { await api("/api/settings",{method:"PUT",body:JSON.stringify(partial)}); } catch(e){console.warn("Settings save failed:",e.message);} }
-async function clearHistory() { if(!confirm("Clear ALL sales history? This cannot be undone."))return; try{await api("/api/history",{method:"DELETE"});await loadBootstrap();}catch(err){alert(err.message);} }
-function resetSale() { state.cart=[]; document.getElementById("discount").value="0"; document.getElementById("tax").value="10"; document.getElementById("paymentMethod").value="Cash"; document.getElementById("amountReceived").value="0"; document.getElementById("splitPaymentFields").hidden=true; renderCart(); }
+async function persistSettings(partial) {
+  try { await api("/api/settings", { method: "PUT", body: JSON.stringify(partial) }); }
+  catch(e) { console.warn("Settings save failed:", e.message); }
+}
+async function clearHistory() {
+  if (!confirm("Clear ALL sales history? This cannot be undone.")) return;
+  try {
+    await api("/api/history", { method: "DELETE" });
+    await loadBootstrap();
+  } catch(err) { alert(err.message); }
+}
+function resetSale() {
+  state.cart = [];
+  document.getElementById("discount").value         = "0";
+  document.getElementById("tax").value              = "10";
+  document.getElementById("paymentMethod").value    = "Cash";
+  document.getElementById("amountReceived").value   = "0";
+  document.getElementById("splitPaymentFields").hidden = true;
+  renderCart();
+}
 
 async function handleLogin(event) {
   event.preventDefault();
@@ -597,7 +633,14 @@ async function handleLogin(event) {
   finally{btn.disabled=false;btn.textContent="Login";}
 }
 
-function logout() { clearToken(); state.currentUser=null; state.cart=[]; applySessionState(); renderCart(); if(receiptContent)receiptContent.textContent="No completed sale yet."; }
+function logout() {
+  clearToken();
+  state.currentUser = null;
+  state.cart        = [];
+  applySessionState();
+  renderCart();
+  if (receiptContent) receiptContent.textContent = "No completed sale yet.";
+}
 
 // ── USER MANAGEMENT ───────────────────────────────────────────
 async function loadUsers() {
@@ -1079,23 +1122,8 @@ function renderAuditLog(rows) {
   });
 }
 
-// ── COST PRICE UPDATE (from inventory tab) ────────────────────
-async function updateCostPrice(event) {
-  event.preventDefault();
-  const sku       = document.getElementById("costSku")?.value?.trim();
-  const costPrice = Number(document.getElementById("costPrice")?.value || 0);
-  const qty       = Number(document.getElementById("costQty")?.value   || 0);
-  const reason    = document.getElementById("costReason")?.value?.trim() || "";
-  if (!sku || costPrice <= 0) { alert("SKU and a valid cost price are required."); return; }
-  try {
-    await api(`/api/products/${encodeURIComponent(sku)}/cost`, {
-      method: "PATCH", body: JSON.stringify({ costPrice, qty, reason })
-    });
-    event.target.reset();
-    await loadBootstrap();
-    alert(`✅ Cost price updated for "${sku}"!${qty > 0 ? `\nFIFO batch of ${qty} units seeded.` : ""}`);
-  } catch(e) { alert("❌ " + e.message); }
-}
+// Cost price is stored on the product itself (set at add-product time).
+// COGS in reports derives from product.cost_price → wholesale_price fallback.
 
 function init() {
   document.getElementById("loginForm")?.addEventListener("submit",handleLogin);
@@ -1127,7 +1155,6 @@ function init() {
   document.getElementById("reportDateForm")?.addEventListener("submit", applyReportDateRange);
   document.getElementById("zReportForm")?.addEventListener("submit", closeDay);
   document.getElementById("auditEntityFilter")?.addEventListener("change", loadAuditLog);
-  document.getElementById("costPriceForm")?.addEventListener("submit", updateCostPrice);
   initAdminTabs();
   barcodeInput?.addEventListener("keydown",handleBarcode);
   productSearch?.addEventListener("input",renderProducts);

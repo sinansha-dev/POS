@@ -286,6 +286,7 @@ const DB = {
       barcode,
       wholesalePrice,
       retailPrice,
+      costPrice,
       mrp,
       stock,
       hsnCode,
@@ -303,6 +304,7 @@ const DB = {
         price: retailPrice,
         wholesale_price: wholesalePrice,
         retail_price: retailPrice,
+        cost_price: costPrice || wholesalePrice || 0,
         mrp,
         stock,
         hsn_code: hsnCode || null,
@@ -326,7 +328,7 @@ const DB = {
         });
       }
     } else {
-      getDb().prepare("INSERT INTO products (id, name, sku, barcode, price, wholesale_price, retail_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      getDb().prepare("INSERT INTO products (id, name, sku, barcode, price, wholesale_price, retail_price, cost_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .run(
           id,
           name,
@@ -335,6 +337,7 @@ const DB = {
           retailPrice,
           wholesalePrice,
           retailPrice,
+          costPrice || wholesalePrice || 0,
           mrp,
           stock,
           hsnCode || null,
@@ -599,8 +602,9 @@ const DB = {
   // Sales since a given timestamp (for Z-report computation)
   async getSalesSince(since) {
     if (SUPABASE_URL) {
+      // Do NOT encodeURIComponent on the timestamp value — PostgREST expects raw ISO strings
       return await sbQuery("sales", "GET", null,
-        `?timestamp=gte.${encodeURIComponent(since)}&order=id.asc`) || [];
+        `?timestamp=gte.${since}&order=id.asc`) || [];
     }
     return getDb().prepare("SELECT * FROM sales WHERE timestamp >= ? ORDER BY id ASC").all(since);
   },
@@ -767,7 +771,7 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/products" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const body = await parseBody(req);
-    const { name, sku, barcode, wholesalePrice, retailPrice: rawRetail, mrp, stock, hsnCode, gstRate, cessRate, categoryId } = body;
+    const { name, sku, barcode, wholesalePrice, retailPrice: rawRetail, costPrice: rawCostPrice, mrp, stock, hsnCode, gstRate, cessRate, categoryId } = body;
     if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
     const wholesale = Number(wholesalePrice);
@@ -775,6 +779,8 @@ async function handleApi(req, res, pathname) {
     const cess = Number(cessRate || 0);
     // Use retailPrice from frontend (user-editable); fallback to auto-calc
     const retailPrice = rawRetail ? Number(rawRetail) : +(wholesale + (wholesale * (gst + cess) / 100)).toFixed(2);
+    // costPrice: explicit value from form, or fallback to wholesale
+    const costPrice = rawCostPrice && Number(rawCostPrice) > 0 ? Number(rawCostPrice) : wholesale;
     const mrpVal = Number(mrp);
     // MRP of 0 means user didn't set it — default to retail. Otherwise retail must be <= MRP.
     const finalMrp = mrpVal <= 0 ? retailPrice : mrpVal;
@@ -787,6 +793,7 @@ async function handleApi(req, res, pathname) {
         barcode: String(barcode || sku).trim(),
         wholesalePrice: wholesale,
         retailPrice,
+        costPrice,
         mrp: finalMrp,
         stock: Number(stock),
         hsnCode: String(hsnCode || "").trim(),
@@ -1252,71 +1259,90 @@ async function handleApi(req, res, pathname) {
       }});
     }
 
-    // ── Supabase path ────────────────────────────────────────────
-    let salesFilter = "?select=timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc";
+    // ── Supabase path — no FK joins; fetch and cross-reference in code ──────
+    let salesFilter = "?select=id,timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc&limit=1000";
     if (fromDate) salesFilter += `&timestamp=gte.${fromDate}T00:00:00`;
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
-    const sales    = await sbQuery("sales",    "GET", null, salesFilter) || [];
-    const items    = await sbQuery("sale_items","GET",null,"?select=name,qty,price,product_id,cogs,sales(timestamp,payment_method,total)") || [];
-    const products = await sbQuery("products",  "GET",null,"?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
+    const sales    = await sbQuery("sales", "GET", null, salesFilter) || [];
+    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
 
+    // Build lookup map: sale.id → sale  (used to resolve sale_items)
+    const saleById = {};
+    for (const s of sales) saleById[s.id] = s;
+
+    // Fetch sale_items only for the sales we loaded (avoids full table scan)
+    const saleIds = Object.keys(saleById);
+    let items = [];
+    if (saleIds.length > 0) {
+      items = await sbQuery("sale_items","GET",null,
+        `?select=sale_id,name,qty,cogs&sale_id=in.(${saleIds.join(",")})&limit=5000`).catch(()=>[]) || [];
+    }
+
+    // 30-day window for slow-moving report (separate query)
     const cutoff30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
+    const recentSales = await sbQuery("sales","GET",null,
+      `?select=id,payment_method,total&timestamp=gte.${cutoff30}T00:00:00&limit=500`).catch(()=>[]) || [];
+    const recentSaleIds = new Set(
+      recentSales.filter(s=>(s.total||0)>0 && s.payment_method !== "REFUND").map(s=>s.id)
+    );
+    const recentItems = recentSaleIds.size > 0
+      ? await sbQuery("sale_items","GET",null,
+          `?select=sale_id,name,qty&sale_id=in.(${[...recentSaleIds].join(",")})&limit=3000`).catch(()=>[]) || []
+      : [];
+
+    const cutoff30Str = cutoff30 + "T00:00:00";
     const dailyMap={}, monthMap={}, taxMap={}, cashMap={}, itemMap={};
 
     for (const s of sales) {
       if ((s.total||0) < 0 || s.payment_method === "REFUND") continue;
-      const day=s.timestamp?.slice(0,10), month=s.timestamp?.slice(0,7);
+      const day   = s.timestamp?.slice(0,10);
+      const month = s.timestamp?.slice(0,7);
       if (!day) continue;
-      if (!dailyMap[day])   dailyMap[day]  ={day,   revenue:0, transactions:0};
-      if (!monthMap[month]) monthMap[month]={month, revenue:0};
-      if (!taxMap[day])     taxMap[day]    ={day,   gst:0};
-      const m=s.payment_method||"Other";
-      if (!cashMap[m])      cashMap[m]     ={method:m, amount:0, count:0};
-      dailyMap[day].revenue      =+((dailyMap[day].revenue||0)  +(s.total||0)).toFixed(2);
+      if (!dailyMap[day])   dailyMap[day]  = { day,   revenue:0, transactions:0 };
+      if (!monthMap[month]) monthMap[month] = { month, revenue:0 };
+      if (!taxMap[day])     taxMap[day]    = { day,   gst:0 };
+      const m = s.payment_method || "Other";
+      if (!cashMap[m])      cashMap[m]     = { method:m, amount:0, count:0 };
+      dailyMap[day].revenue      = +((dailyMap[day].revenue||0)   + (s.total||0)).toFixed(2);
       dailyMap[day].transactions++;
-      monthMap[month].revenue    =+((monthMap[month].revenue||0)+(s.total||0)).toFixed(2);
-      taxMap[day].gst            =+((taxMap[day].gst||0)        +(s.tax||0)).toFixed(2);
-      cashMap[m].amount          =+((cashMap[m].amount||0)      +(s.total||0)).toFixed(2);
+      monthMap[month].revenue    = +((monthMap[month].revenue||0) + (s.total||0)).toFixed(2);
+      taxMap[day].gst            = +((taxMap[day].gst||0)         + (s.tax||0)).toFixed(2);
+      cashMap[m].amount          = +((cashMap[m].amount||0)       + (s.total||0)).toFixed(2);
       cashMap[m].count++;
     }
 
     for (const i of items) {
-      const st = i.sales?.timestamp?.slice(0,10);
-      const isRefund = i.sales?.payment_method === "REFUND" || (i.sales?.total || 0) < 0;
-      if (isRefund) continue;
-      if (fromDate && st && st < fromDate) continue;
-      if (toDate && st && st > toDate) continue;
-      if (!itemMap[i.name]) itemMap[i.name]={name:i.name, qty:0, cogs:0};
-      itemMap[i.name].qty  += i.qty||0;
-      itemMap[i.name].cogs += i.cogs||0;
+      const sale = saleById[i.sale_id];
+      if (!sale) continue;
+      if ((sale.total||0) < 0 || sale.payment_method === "REFUND") continue;
+      if (!itemMap[i.name]) itemMap[i.name] = { name:i.name, qty:0, cogs:0 };
+      itemMap[i.name].qty  += i.qty  || 0;
+      itemMap[i.name].cogs  = +((itemMap[i.name].cogs||0) + (i.cogs||0)).toFixed(2);
     }
-    const allItems = Object.values(itemMap);
 
-    // Slow moving — 30-day window
+    // Slow-moving: sold qty per product in last 30 days
     const sold30Map = {};
-    const recentItems = await sbQuery("sale_items","GET",null,
-      `?select=name,qty,sales(timestamp,payment_method,total)&sales.timestamp=gte.${cutoff30}T00:00:00`) || [];
     for (const i of recentItems) {
-      const ts = i.sales?.timestamp;
-      const isRefund = i.sales?.payment_method === "REFUND" || (i.sales?.total || 0) < 0;
-      if (!ts || ts.slice(0,10) < cutoff30 || isRefund) continue;
-      sold30Map[i.name] = (sold30Map[i.name]||0) + (i.qty||0);
+      if (recentSaleIds.has(i.sale_id)) sold30Map[i.name] = (sold30Map[i.name]||0) + (i.qty||0);
     }
     const slowMoving = products
       .filter(p => p.stock > 0)
-      .map(p => ({ name: p.name, sku: p.sku, stock: p.stock, qty: sold30Map[p.name] || 0 }))
+      .map(p => ({ name:p.name, sku:p.sku, stock:p.stock, qty:sold30Map[p.name]||0 }))
       .sort((a,b) => a.qty !== b.qty ? a.qty - b.qty : b.stock - a.stock)
       .slice(0, 10);
 
-    const revenue    = +sales.filter(s=>(s.total||0)>0 && s.payment_method !== "REFUND").reduce((a,s)=>a+(s.total||0),0).toFixed(2);
-    const cogs       = +sales.filter(s=>(s.total||0)>=0 && s.payment_method !== "REFUND").reduce((a,s)=>a+(s.cogs||0),0).toFixed(2);
-    const stockValue = +products.reduce((a,p)=>a+((p.cost_price||p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
+    const revenue    = +sales.filter(s=>(s.total||0)>0 && s.payment_method !== "REFUND")
+                             .reduce((a,s)=>a+(s.total||0),0).toFixed(2);
+    const cogs       = +sales.filter(s=>(s.total||0)>=0 && s.payment_method !== "REFUND")
+                             .reduce((a,s)=>a+(s.cogs||0),0).toFixed(2);
+    const stockValue = +products.reduce((a,p)=>
+                         a+((p.cost_price||p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
 
     return json(res, 200, { reports: {
       dailySales:     Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       monthlyRevenue: Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
-      bestSelling:    [...allItems].sort((a,b)=>b.qty-a.qty).slice(0,10),
+      bestSelling:    Object.values(itemMap).sort((a,b)=>b.qty-a.qty).slice(0,10),
       slowMoving,
       taxReport:      Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       cashSummary:    Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
@@ -1539,7 +1565,13 @@ async function handleApi(req, res, pathname) {
       notes: String(notes || "").slice(0, 500), status: "closed",
     };
 
-    await DB.insertZReport(row);
+    await DB.insertZReport(row).catch(err => {
+      // Most common cause: z_reports table not created in Supabase yet.
+      const hint = SUPABASE_URL
+        ? " Run the migration SQL from the top of server.js in your Supabase SQL editor."
+        : "";
+      throw new Error("Failed to save Z-Report: " + err.message + hint);
+    });
     await DB.writeAudit({ actor: admin.username, action: "Z_REPORT", entityType: "z_report",
       entityId: today, after: row });
     return json(res, 200, { ok: true, zReport: row });
@@ -1563,29 +1595,8 @@ async function handleApi(req, res, pathname) {
     return json(res, 200, { auditLog: rows });
   }
 
-  // ── COST PRICE UPDATE ─────────────────────────────────────────
-  if (pathname.startsWith("/api/products/") && pathname.endsWith("/cost") && req.method === "PATCH") {
-    const admin = requireAdmin(req);
-    if (!admin) return json(res, 403, { error: "Admin only." });
-    const sku = decodeURIComponent(pathname.replace("/api/products/", "").replace("/cost", ""));
-    const { costPrice, qty, reason } = await parseBody(req);
-    if (isNaN(Number(costPrice)) || Number(costPrice) < 0) return json(res, 400, { error: "Invalid cost price." });
-    if (SUPABASE_URL) {
-      await sbQuery("products", "PATCH", { cost_price: Number(costPrice) }, `?sku=ilike.${encodeURIComponent(sku)}`);
-      const rows = await sbQuery("products","GET",null,`?sku=ilike.${encodeURIComponent(sku)}&select=id&limit=1`).catch(()=>null);
-      const productId = rows?.[0]?.id;
-      if (productId && Number(qty) > 0) await DB.insertCostBatch(productId, Number(costPrice), Number(qty));
-    } else {
-      getDb().prepare("UPDATE products SET cost_price=? WHERE lower(sku)=lower(?)").run(Number(costPrice), sku);
-      if (Number(qty) > 0) {
-        const row = getDb().prepare("SELECT id FROM products WHERE lower(sku)=lower(?)").get(sku);
-        if (row) await DB.insertCostBatch(row.id, Number(costPrice), Number(qty));
-      }
-    }
-    await DB.writeAudit({ actor: admin.username, action: "COST_UPDATE", entityType: "product",
-      entityId: sku, after: { costPrice: Number(costPrice), qty: Number(qty||0) }, note: reason||null });
-    return json(res, 200, { ok: true });
-  }
+  // Cost price is set at product-creation time via the Add Product form.
+  // The /cost endpoint has been removed; use cost_price column on the product directly.
 
   return false;
 }
