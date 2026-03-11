@@ -382,9 +382,7 @@ const DB = {
 
   async decrementStock(id, qty) {
     if (SUPABASE_URL) {
-      // Optimistic CAS loop to reduce oversell under concurrent checkouts.
-      // Some PostgREST deployments return 204 with empty body even on success,
-      // so we verify via a follow-up read before retrying.
+      // Optimistic CAS loop to avoid oversell under concurrent checkouts.
       for (let attempt = 0; attempt < 3; attempt++) {
         const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&select=id,stock&limit=1`);
         const current = Number(rows?.[0]?.stock || 0);
@@ -402,13 +400,8 @@ const DB = {
           body: JSON.stringify({ stock: newStock }),
         });
         if (!patchRes.ok) throw new Error(`Stock update failed for product ${id}: ${await patchRes.text()}`);
-
         const updated = await patchRes.json().catch(() => []);
         if (Array.isArray(updated) && updated.length) return;
-
-        const verify = await sbQuery("products", "GET", null, `?id=eq.${id}&select=stock&limit=1`).catch(() => []);
-        const after = Number(verify?.[0]?.stock ?? current);
-        if (after <= newStock) return;
       }
       throw new Error(`Concurrent stock update detected for product ${id}. Please retry.`);
     } else {
@@ -1319,32 +1312,9 @@ async function handleApi(req, res, pathname) {
     if (fromDate) salesFilter += `&timestamp=gte.${fromDate}T00:00:00`;
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
-    let sales = [];
-    try {
-      sales = await sbQuery("sales", "GET", null, salesFilter) || [];
-    } catch (e) {
-      if (!isSupabaseMissingColumnError(e)) throw e;
-      let fallbackFilter = "?select=id,timestamp,total,tax,payment_method,subtotal&order=timestamp.desc";
-      if (fromDate) fallbackFilter += `&timestamp=gte.${fromDate}T00:00:00`;
-      if (toDate)   fallbackFilter += `&timestamp=lte.${toDate}T23:59:59`;
-      sales = await sbQuery("sales", "GET", null, fallbackFilter) || [];
-    }
-
-    let items = [];
-    try {
-      items = await sbQuery("sale_items","GET",null,"?select=sale_id,name,qty,price,product_id,cogs") || [];
-    } catch (e) {
-      if (!isSupabaseMissingColumnError(e)) throw e;
-      items = await sbQuery("sale_items","GET",null,"?select=sale_id,name,qty,price,product_id") || [];
-    }
-
-    let products = [];
-    try {
-      products = await sbQuery("products", "GET", null, "?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
-    } catch (e) {
-      if (!isSupabaseMissingColumnError(e)) throw e;
-      products = await sbQuery("products", "GET", null, "?select=id,name,sku,stock,price") || [];
-    }
+    const sales    = await sbQuery("sales",    "GET", null, salesFilter) || [];
+    const items    = await sbQuery("sale_items","GET",null,"?select=name,qty,price,product_id,cogs,sales(timestamp,payment_method,total)") || [];
+    const products = await sbQuery("products",  "GET",null,"?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
 
     const cutoff30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
     const dailyMap={}, monthMap={}, taxMap={}, cashMap={}, itemMap={};
@@ -1370,10 +1340,8 @@ async function handleApi(req, res, pathname) {
     for (const s of sales) saleMeta.set(s.id, s);
 
     for (const i of items) {
-      const saleRow = saleMeta.get(i.sale_id);
-      if (!saleRow) continue;
-      const st = saleRow.timestamp?.slice(0,10);
-      const isRefund = saleRow.payment_method === "REFUND" || (saleRow.total || 0) < 0;
+      const st = i.sales?.timestamp?.slice(0,10);
+      const isRefund = i.sales?.payment_method === "REFUND" || (i.sales?.total || 0) < 0;
       if (isRefund) continue;
       if (fromDate && st && st < fromDate) continue;
       if (toDate && st && st > toDate) continue;
@@ -1385,16 +1353,11 @@ async function handleApi(req, res, pathname) {
 
     // Slow moving — 30-day window
     const sold30Map = {};
-    const recentSales = await sbQuery("sales", "GET", null,
-      `?select=id,timestamp,total,payment_method&timestamp=gte.${cutoff30}T00:00:00&order=timestamp.desc`) || [];
-    const recentSaleMeta = new Map();
-    for (const s of recentSales) recentSaleMeta.set(s.id, s);
-
-    const recentItems = await sbQuery("sale_items","GET",null,`?select=sale_id,name,qty`) || [];
+    const recentItems = await sbQuery("sale_items","GET",null,
+      `?select=name,qty,sales(timestamp,payment_method,total)&sales.timestamp=gte.${cutoff30}T00:00:00`) || [];
     for (const i of recentItems) {
-      const saleRow = recentSaleMeta.get(i.sale_id);
-      const ts = saleRow?.timestamp;
-      const isRefund = saleRow?.payment_method === "REFUND" || (saleRow?.total || 0) < 0;
+      const ts = i.sales?.timestamp;
+      const isRefund = i.sales?.payment_method === "REFUND" || (i.sales?.total || 0) < 0;
       if (!ts || ts.slice(0,10) < cutoff30 || isRefund) continue;
       sold30Map[i.name] = (sold30Map[i.name]||0) + (i.qty||0);
     }
