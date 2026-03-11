@@ -376,21 +376,35 @@ const DB = {
 
   async decrementStock(id, qty) {
     if (SUPABASE_URL) {
-      // Direct PATCH — no Supabase RPC function required
-      const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&select=id,stock&limit=1`);
-      const current = Number(rows?.[0]?.stock || 0);
-      const newStock = Math.max(current - qty, 0);
-      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}`, {
-        method: "PATCH",
-        headers: {
-          "apikey":        SUPABASE_KEY,
-          "Authorization": `Bearer ${SUPABASE_KEY}`,
-          "Content-Type":  "application/json",
-          "Prefer":        "return=minimal",
-        },
-        body: JSON.stringify({ stock: newStock }),
-      });
-      if (!patchRes.ok) throw new Error(`Stock update failed for product ${id}: ${await patchRes.text()}`);
+      // Optimistic CAS loop to reduce oversell under concurrent checkouts.
+      // Some PostgREST deployments return 204 with empty body even on success,
+      // so we verify via a follow-up read before retrying.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const rows = await sbQuery("products", "GET", null, `?id=eq.${id}&select=id,stock&limit=1`);
+        const current = Number(rows?.[0]?.stock || 0);
+        if (current < qty) throw new Error(`Insufficient stock for product ${id}.`);
+        const newStock = current - qty;
+
+        const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${id}&stock=eq.${current}`, {
+          method: "PATCH",
+          headers: {
+            "apikey":        SUPABASE_KEY,
+            "Authorization": `Bearer ${SUPABASE_KEY}`,
+            "Content-Type":  "application/json",
+            "Prefer":        "return=representation",
+          },
+          body: JSON.stringify({ stock: newStock }),
+        });
+        if (!patchRes.ok) throw new Error(`Stock update failed for product ${id}: ${await patchRes.text()}`);
+
+        const updated = await patchRes.json().catch(() => []);
+        if (Array.isArray(updated) && updated.length) return;
+
+        const verify = await sbQuery("products", "GET", null, `?id=eq.${id}&select=stock&limit=1`).catch(() => []);
+        const after = Number(verify?.[0]?.stock ?? current);
+        if (after <= newStock) return;
+      }
+      throw new Error(`Concurrent stock update detected for product ${id}. Please retry.`);
     } else {
       getDb().prepare("UPDATE products SET stock = stock - ? WHERE id = ?").run(qty, id);
     }
@@ -610,15 +624,15 @@ function sqliteFeatureData() {
   const stockBatches = dbx.prepare("SELECT id, sku, batch_no as batchNo, expiry_date as expiryDate, qty FROM stock_batches ORDER BY expiry_date ASC").all();
   const customers = dbx.prepare("SELECT id, name, phone, loyalty_points as loyaltyPoints, member_discount as memberDiscount, credit_balance as creditBalance FROM customers ORDER BY name").all();
 
-  const dailySales = dbx.prepare("SELECT date(timestamp) as day, round(sum(total),2) as revenue, count(*) as transactions FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
-  const monthlyRevenue = dbx.prepare("SELECT substr(timestamp,1,7) as month, round(sum(total),2) as revenue FROM sales GROUP BY substr(timestamp,1,7) ORDER BY month DESC LIMIT 12").all();
-  const bestSelling = dbx.prepare("SELECT name, sum(qty) as qty FROM sale_items GROUP BY name ORDER BY qty DESC LIMIT 10").all();
-  const slowMoving = dbx.prepare("SELECT p.name, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id GROUP BY p.id ORDER BY qty ASC LIMIT 10").all();
-  const taxReport = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
-  const cashSummary = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales GROUP BY payment_method ORDER BY amount DESC").all();
+  const dailySales = dbx.prepare("SELECT date(timestamp) as day, round(sum(total),2) as revenue, count(*) as transactions FROM sales WHERE payment_method != 'REFUND' GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
+  const monthlyRevenue = dbx.prepare("SELECT substr(timestamp,1,7) as month, round(sum(total),2) as revenue FROM sales WHERE payment_method != 'REFUND' GROUP BY substr(timestamp,1,7) ORDER BY month DESC LIMIT 12").all();
+  const bestSelling = dbx.prepare("SELECT si.name, sum(si.qty) as qty, round(sum(si.cogs),2) as cogs FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.payment_method != 'REFUND' GROUP BY si.name ORDER BY qty DESC LIMIT 10").all();
+  const slowMoving = dbx.prepare("SELECT p.name, p.sku, p.stock, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id AND si.sale_id IN (SELECT id FROM sales WHERE payment_method != 'REFUND') WHERE p.stock > 0 GROUP BY p.id ORDER BY qty ASC, p.stock DESC LIMIT 10").all();
+  const taxReport = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales WHERE payment_method != 'REFUND' GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
+  const cashSummary = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales WHERE payment_method != 'REFUND' GROUP BY payment_method ORDER BY amount DESC").all();
   const stockValue = dbx.prepare("SELECT round(sum(price * stock),2) as value FROM products").get()?.value || 0;
-  const revenue = dbx.prepare("SELECT round(sum(total),2) as v FROM sales").get()?.v || 0;
-  const cogs = dbx.prepare("SELECT round(sum(price * qty),2) as v FROM sale_items").get()?.v || 0;
+  const revenue = dbx.prepare("SELECT round(sum(total),2) as v FROM sales WHERE payment_method != 'REFUND'").get()?.v || 0;
+  const cogs = dbx.prepare("SELECT round(sum(cogs),2) as v FROM sale_items").get()?.v || 0;
 
   return {
     suppliers, purchaseOrders, stockTransfers, stockBatches, customers,
@@ -857,8 +871,17 @@ async function handleApi(req, res, pathname) {
     }
     const { subtotal, tax, discount, total, enrichedItems } = computed;
 
+    const paymentMethod = String(sale.paymentMethod || "Cash");
+    if (!["Cash", "Card", "Mobile Wallet", "Split"].includes(paymentMethod)) {
+      return json(res, 400, { error: "Invalid payment method." });
+    }
+
     const received     = Number(sale.received ?? total);
     const changeAmount = +(received - total).toFixed(2);
+    if (!Number.isFinite(received) || received < 0) return json(res, 400, { error: "Invalid received amount." });
+    if (["Card", "Mobile Wallet", "Split"].includes(paymentMethod) && Math.abs(received - total) > 0.01) {
+      return json(res, 400, { error: "Non-cash payments must match total exactly." });
+    }
     if (received < total - 0.01) return json(res, 400, { error: "Received amount is less than total." });
 
     const timestamp = new Date().toISOString();
@@ -894,7 +917,7 @@ async function handleApi(req, res, pathname) {
             INSERT INTO sales (receipt_no, timestamp, cashier, payment_method,
               subtotal, discount, tax, total, received, change_amount, currency, cogs, idempotency_key)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-          `).run(receiptNo, timestamp, user.username, sale.paymentMethod || "Cash",
+          `).run(receiptNo, timestamp, user.username, paymentMethod,
                  subtotal, discount, tax, total, received, changeAmount,
                  sale.currency || "INR", 0, idempotencyKey);
           const saleId = saleInfo.lastInsertRowid;
@@ -923,7 +946,7 @@ async function handleApi(req, res, pathname) {
           }
 
           dbx.prepare("UPDATE sales SET cogs=? WHERE id=?").run(+totalCogs.toFixed(2), saleId);
-          txResult = { ok: true, receiptNo, timestamp, subtotal, tax, discount, total };
+          txResult = { ok: true, receiptNo, timestamp, subtotal, tax, discount, total, paymentMethod, items: enrichedItems };
         }
 
         // Commit only if no user error; rollback undoes stock decrements if needed
@@ -961,7 +984,7 @@ async function handleApi(req, res, pathname) {
       receipt_no:     receiptNo,
       timestamp,
       cashier:        user.username,
-      payment_method: sale.paymentMethod || "Cash",
+      payment_method: paymentMethod,
       subtotal, discount, tax, total, received,
       change_amount:  changeAmount,
       currency:       sale.currency || "INR",
@@ -984,7 +1007,7 @@ async function handleApi(req, res, pathname) {
       });
     }
 
-    return json(res, 200, { ok: true, receiptNo, timestamp, subtotal, tax, discount, total });
+    return json(res, 200, { ok: true, receiptNo, timestamp, subtotal, tax, discount, total, paymentMethod, items: enrichedItems });
   }
 
   if (pathname === "/api/history" && req.method === "DELETE") {
@@ -1177,7 +1200,7 @@ async function handleApi(req, res, pathname) {
           });
         }
       }
-      await sbQuery("sales","POST",{ receipt_no:refundNo, timestamp:new Date().toISOString(), cashier:user.username, payment_method:"REFUND", subtotal:-(sale.subtotal||0), discount:0, tax:-(sale.tax||0), total:-(sale.total||0), received:0, change_amount:sale.total||0, currency:sale.currency||"USD" });
+      await sbQuery("sales","POST",{ receipt_no:refundNo, timestamp:new Date().toISOString(), cashier:user.username, payment_method:"REFUND", subtotal:-(sale.subtotal||0), discount:0, tax:-(sale.tax||0), total:-(sale.total||0), received:0, change_amount:sale.total||0, currency:sale.currency||"INR" });
       await DB.writeAudit({ actor: user.username, action: "REFUND", entityType: "sale",
         entityId: receiptNo, after: { refundNo, amount: sale.total, reason: reason||null },
         note: reason || null });
@@ -1190,7 +1213,7 @@ async function handleApi(req, res, pathname) {
     if (dbx.prepare("SELECT id FROM sales WHERE receipt_no=?").get(refundNo)) return json(res, 409, { error: "Already refunded." });
     const items = dbx.prepare("SELECT product_id, qty FROM sale_items WHERE sale_id=?").all(sale.id);
     for (const item of items) dbx.prepare("UPDATE products SET stock=stock+? WHERE id=?").run(item.qty, item.product_id);
-    dbx.prepare("INSERT INTO sales (receipt_no,timestamp,cashier,payment_method,subtotal,discount,tax,total,received,change_amount,currency) VALUES(?,?,?,'REFUND',?,0,?,?,0,?,?)").run(refundNo, new Date().toISOString(), user.username, -(sale.subtotal||0), -(sale.tax||0), -(sale.total||0), sale.total||0, sale.currency||"USD");
+    dbx.prepare("INSERT INTO sales (receipt_no,timestamp,cashier,payment_method,subtotal,discount,tax,total,received,change_amount,currency) VALUES(?,?,?,'REFUND',?,0,?,?,0,?,?)").run(refundNo, new Date().toISOString(), user.username, -(sale.subtotal||0), -(sale.tax||0), -(sale.total||0), sale.total||0, sale.currency||"INR");
     await DB.writeAudit({ actor: user.username, action: "REFUND", entityType: "sale",
       entityId: receiptNo, after: { refundNo, amount: sale.total, reason: reason||null },
       note: reason || null });
@@ -1237,12 +1260,12 @@ async function handleApi(req, res, pathname) {
     }
 
     // ── Supabase path ────────────────────────────────────────────
-    let salesFilter = "?select=timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc";
+    let salesFilter = "?select=id,timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc";
     if (fromDate) salesFilter += `&timestamp=gte.${fromDate}T00:00:00`;
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
     const sales    = await sbQuery("sales",    "GET", null, salesFilter) || [];
-    const items    = await sbQuery("sale_items","GET",null,"?select=name,qty,price,product_id,cogs") || [];
+    const items    = await sbQuery("sale_items","GET",null,"?select=sale_id,name,qty,price,product_id,cogs") || [];
     const products = await sbQuery("products",  "GET",null,"?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
 
     const cutoff30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0,10);
@@ -1265,7 +1288,17 @@ async function handleApi(req, res, pathname) {
       cashMap[m].count++;
     }
 
+    const saleMeta = new Map();
+    for (const s of sales) saleMeta.set(s.id, s);
+
     for (const i of items) {
+      const saleRow = saleMeta.get(i.sale_id);
+      if (!saleRow) continue;
+      const st = saleRow.timestamp?.slice(0,10);
+      const isRefund = saleRow.payment_method === "REFUND" || (saleRow.total || 0) < 0;
+      if (isRefund) continue;
+      if (fromDate && st && st < fromDate) continue;
+      if (toDate && st && st > toDate) continue;
       if (!itemMap[i.name]) itemMap[i.name]={name:i.name, qty:0, cogs:0};
       itemMap[i.name].qty  += i.qty||0;
       itemMap[i.name].cogs += i.cogs||0;
@@ -1274,11 +1307,17 @@ async function handleApi(req, res, pathname) {
 
     // Slow moving — 30-day window
     const sold30Map = {};
-    const recentItems = await sbQuery("sale_items","GET",null,
-      `?select=name,qty,sales(timestamp)&sales.timestamp=gte.${cutoff30}T00:00:00`) || [];
+    const recentSales = await sbQuery("sales", "GET", null,
+      `?select=id,timestamp,total,payment_method&timestamp=gte.${cutoff30}T00:00:00&order=timestamp.desc`) || [];
+    const recentSaleMeta = new Map();
+    for (const s of recentSales) recentSaleMeta.set(s.id, s);
+
+    const recentItems = await sbQuery("sale_items","GET",null,`?select=sale_id,name,qty`) || [];
     for (const i of recentItems) {
-      const ts = i.sales?.timestamp;
-      if (!ts || ts.slice(0,10) < cutoff30) continue;
+      const saleRow = recentSaleMeta.get(i.sale_id);
+      const ts = saleRow?.timestamp;
+      const isRefund = saleRow?.payment_method === "REFUND" || (saleRow?.total || 0) < 0;
+      if (!ts || ts.slice(0,10) < cutoff30 || isRefund) continue;
       sold30Map[i.name] = (sold30Map[i.name]||0) + (i.qty||0);
     }
     const slowMoving = products
@@ -1287,8 +1326,8 @@ async function handleApi(req, res, pathname) {
       .sort((a,b) => a.qty !== b.qty ? a.qty - b.qty : b.stock - a.stock)
       .slice(0, 10);
 
-    const revenue    = +sales.filter(s=>(s.total||0)>0).reduce((a,s)=>a+(s.total||0),0).toFixed(2);
-    const cogs       = +items.reduce((a,i)=>a+(i.cogs||0),0).toFixed(2);
+    const revenue    = +sales.filter(s=>(s.total||0)>0 && s.payment_method !== "REFUND").reduce((a,s)=>a+(s.total||0),0).toFixed(2);
+    const cogs       = +sales.filter(s=>(s.total||0)>=0 && s.payment_method !== "REFUND").reduce((a,s)=>a+(s.cogs||0),0).toFixed(2);
     const stockValue = +products.reduce((a,p)=>a+((p.cost_price||p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
 
     return json(res, 200, { reports: {
@@ -1485,6 +1524,11 @@ async function handleApi(req, res, pathname) {
     const admin = requireAdmin(req);
     if (!admin) return json(res, 403, { error: "Admin only." });
     const { openingCash = 0, closingCash = 0, notes = "" } = await parseBody(req);
+    const openNum = Number(openingCash);
+    const closeNum = Number(closingCash);
+    if (!Number.isFinite(openNum) || !Number.isFinite(closeNum) || openNum < 0 || closeNum < 0) {
+      return json(res, 400, { error: "Invalid cash values for Z-report." });
+    }
 
     const lastZ   = await DB.getLastZReport();
     const since   = lastZ?.closed_at || new Date().toISOString().slice(0, 10) + "T00:00:00.000Z";
@@ -1509,7 +1553,7 @@ async function handleApi(req, res, pathname) {
 
     const row = {
       report_date: today, closed_at: closedAt, cashier: admin.username,
-      opening_cash: +Number(openingCash).toFixed(2), closing_cash: +Number(closingCash).toFixed(2),
+      opening_cash: +openNum.toFixed(2), closing_cash: +closeNum.toFixed(2),
       cash_sales: +cashSales.toFixed(2), card_sales: +cardSales.toFixed(2),
       mobile_sales: +mobileSales.toFixed(2), split_sales: +splitSales.toFixed(2),
       total_sales: +totalSales.toFixed(2), total_tax: +totalTax.toFixed(2),
@@ -1761,7 +1805,7 @@ async function initSupabase() {
     // Seed settings
     const settings = await sbQuery("settings", "GET", null, "?select=key&limit=1");
     if (!settings || settings.length === 0) {
-      await sbQuery("settings", "POST", { key: "currency",    value: "USD"   });
+      await sbQuery("settings", "POST", { key: "currency",    value: "INR"   });
       await sbQuery("settings", "POST", { key: "theme",       value: "light" });
       await sbQuery("settings", "POST", { key: "cashierName", value: ""      });
     }
