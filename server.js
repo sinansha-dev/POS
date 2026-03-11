@@ -1253,7 +1253,7 @@ async function handleApi(req, res, pathname) {
     }
 
     // ── Supabase path ────────────────────────────────────────────
-    let salesFilter = "?select=timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc";
+    let salesFilter = "?select=id,timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc";
     if (fromDate) salesFilter += `&timestamp=gte.${fromDate}T00:00:00`;
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
@@ -1280,6 +1280,9 @@ async function handleApi(req, res, pathname) {
       cashMap[m].amount          =+((cashMap[m].amount||0)      +(s.total||0)).toFixed(2);
       cashMap[m].count++;
     }
+
+    const saleMeta = new Map();
+    for (const s of sales) saleMeta.set(s.id, s);
 
     for (const i of items) {
       const st = i.sales?.timestamp?.slice(0,10);
@@ -1507,6 +1510,11 @@ async function handleApi(req, res, pathname) {
     const admin = requireAdmin(req);
     if (!admin) return json(res, 403, { error: "Admin only." });
     const { openingCash = 0, closingCash = 0, notes = "" } = await parseBody(req);
+    const openNum = Number(openingCash);
+    const closeNum = Number(closingCash);
+    if (!Number.isFinite(openNum) || !Number.isFinite(closeNum) || openNum < 0 || closeNum < 0) {
+      return json(res, 400, { error: "Invalid cash values for Z-report." });
+    }
 
     const lastZ   = await DB.getLastZReport();
     const since   = lastZ?.closed_at || new Date().toISOString().slice(0, 10) + "T00:00:00.000Z";
@@ -1531,7 +1539,7 @@ async function handleApi(req, res, pathname) {
 
     const row = {
       report_date: today, closed_at: closedAt, cashier: admin.username,
-      opening_cash: +Number(openingCash).toFixed(2), closing_cash: +Number(closingCash).toFixed(2),
+      opening_cash: +openNum.toFixed(2), closing_cash: +closeNum.toFixed(2),
       cash_sales: +cashSales.toFixed(2), card_sales: +cardSales.toFixed(2),
       mobile_sales: +mobileSales.toFixed(2), split_sales: +splitSales.toFixed(2),
       total_sales: +totalSales.toFixed(2), total_tax: +totalTax.toFixed(2),
