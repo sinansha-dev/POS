@@ -1,7 +1,7 @@
 // ── STATE ─────────────────────────────────────────────────────
 const state = {
   products: [], cart: [], history: [], categories: [],
-  currentUser: null, currency: "USD", theme: "light",
+  currentUser: null, currency: "INR", theme: "light",
   heldOrders: JSON.parse(localStorage.getItem("novapos_held_orders") || "[]"),
   customers: [], suppliers: [], reports: {}, taxCodes: [],
   saleKey: crypto.randomUUID(), // idempotency key — regenerated after each sale
@@ -114,7 +114,7 @@ async function loadBootstrap() {
   const data = await api("/api/bootstrap");
   state.products  = data.products  || [];
   state.history   = data.history   || [];
-  state.currency  = data.settings?.currency || "USD";
+  state.currency  = data.settings?.currency || "INR";
   state.theme     = data.settings?.theme    || "light";
   state.customers  = data.customers  || [];
   state.suppliers  = data.suppliers  || [];
@@ -225,6 +225,7 @@ async function processRefund(receiptNo, reason) {
 }
 
 let chartInstance = null;
+let checkoutInFlight = false;
 async function loadReports(fromDate = null, toDate = null) {
   try {
     let url = "/api/reports";
@@ -305,7 +306,7 @@ function renderDashboardChart(r) {
         plugins: { legend: { labels: { color:tc } }, title: { display:true, text:"Revenue & Transactions — Last 7 Days", color:tc, font:{size:14,weight:"600"} } },
         scales: {
           x: { ticks:{color:tc}, grid:{color:gc} },
-          y: { type:"linear", position:"left", ticks:{color:tc,callback:v=>"$"+v}, grid:{color:gc}, title:{display:true,text:"Revenue",color:tc} },
+          y: { type:"linear", position:"left", ticks:{color:tc,callback:v=>money(v)}, grid:{color:gc}, title:{display:true,text:"Revenue",color:tc} },
           y1: { type:"linear", position:"right", ticks:{color:tc}, grid:{drawOnChartArea:false}, title:{display:true,text:"Transactions",color:tc} }
         }
       }
@@ -343,9 +344,11 @@ function buildReceipt(sale, totals) {
   const lpad = (s, n) => String(s).substring(0, n).padEnd(n);
   const rpad = (s, n) => String(s).substring(0, n).padStart(n);
 
+  const saleItems = Array.isArray(sale.items) && sale.items.length ? sale.items : state.cart;
+
   // Build GST groups for CGST/SGST breakup
   const gstGroups = {};
-  state.cart.forEach(i => {
+  saleItems.forEach(i => {
     const r = i.gstRate||0; if (!r) return;
     gstGroups[r] = (gstGroups[r]||0) + extractInclusiveTax(i.price * i.qty, r).gst;
   });
@@ -357,13 +360,13 @@ function buildReceipt(sale, totals) {
     `Receipt : ${sale.receiptNo}`,
     `Date    : ${new Date(sale.timestamp).toLocaleString("en-IN")}`,
     `Cashier : ${state.currentUser?.username||"-"}`,
-    `Payment : ${document.getElementById("paymentMethod")?.value||"-"}`,
+    `Payment : ${sale.paymentMethod || document.getElementById("paymentMethod")?.value || "-"}`,
     line2,
     lpad("Item", 20) + rpad("HSN", 7) + rpad("Qty", 4) + rpad("Rate", 8) + rpad("GST%", 5) + rpad("Total", 8),
     line2,
   ];
 
-  const itemLines = state.cart.map(i => {
+  const itemLines = saleItems.map(i => {
     const lineAmt = i.price * i.qty;
     const lineTax = extractInclusiveTax(lineAmt, i.gstRate || 0);
     return lpad(i.name, 20)
@@ -414,6 +417,7 @@ function downloadReceipt() {
 
 async function completeSale(event) {
   event.preventDefault();
+  if (checkoutInFlight) return;
   if (!state.currentUser) { alert("Please login first."); return; }
   if (!state.cart.length) { alert("Cart is empty."); return; }
 
@@ -421,33 +425,45 @@ async function completeSale(event) {
   const pm = document.getElementById("paymentMethod")?.value;
   const clientTotals = saleTotals();
 
-  // For Card / Mobile Wallet: the exact amount is always charged — auto-fill
-  // received so cashier doesn't need to type in the figure manually.
+  if (!["Cash", "Card", "Mobile Wallet", "Split"].includes(pm)) {
+    alert("Please select a valid payment method.");
+    return;
+  }
+
   if (pm === "Card" || pm === "Mobile Wallet") {
     const amtEl = document.getElementById("amountReceived");
-    if (amtEl && Number(amtEl.value) <= 0) amtEl.value = clientTotals.total.toFixed(2);
+    if (amtEl) amtEl.value = clientTotals.total.toFixed(2);
   }
 
   const splitTotal = ["splitCash","splitCard","splitWallet"].reduce((s, id) => s + Number(document.getElementById(id)?.value || 0), 0);
   const received = pm === "Split" ? splitTotal : Number(document.getElementById("amountReceived")?.value || 0);
 
+  if (!Number.isFinite(received) || received < 0) { alert("Amount received is invalid."); return; }
+  if ((pm === "Card" || pm === "Mobile Wallet" || pm === "Split") && Math.abs(received - clientTotals.total) > 0.01) {
+    alert("Non-cash payment must exactly match total payable.");
+    return;
+  }
   if (received < clientTotals.total - 0.01) { alert("Amount received is less than total."); return; }
 
+  checkoutInFlight = true;
+  const checkoutBtn = document.getElementById("checkoutBtn");
+  if (checkoutBtn) checkoutBtn.disabled = true;
+
   try {
+    const submittedCart = structuredClone(state.cart);
     const sale = await api("/api/sales", { method: "POST", body: JSON.stringify({
       idempotencyKey: state.saleKey,
       paymentMethod:  pm,
       discountPct,
       received,
       currency:       state.currency,
-      items:          state.cart.map(i => ({
+      items:          submittedCart.map(i => ({
         productId: i.productId,
         qty:       i.qty,
         saleType:  i.saleType || "retail",
       })),
     })});
 
-    // Use server-authoritative totals for the receipt
     const serverTotals = {
       subtotal:       sale.subtotal       ?? clientTotals.subtotal,
       discountAmount: sale.discount       ?? clientTotals.discountAmount,
@@ -457,12 +473,16 @@ async function completeSale(event) {
       change:         Math.max(received - (sale.total ?? clientTotals.total), 0),
     };
 
-    receiptContent.textContent = buildReceipt(sale, serverTotals);
+    receiptContent.textContent = buildReceipt({ ...sale, paymentMethod: pm, items: sale.items || submittedCart }, serverTotals);
     state.cart    = [];
-    state.saleKey = crypto.randomUUID(); // rotate idempotency key for next sale
+    state.saleKey = crypto.randomUUID();
     document.getElementById("amountReceived").value = "0";
     await loadBootstrap();
   } catch (err) { alert("Sale failed: " + err.message); }
+  finally {
+    checkoutInFlight = false;
+    if (checkoutBtn) checkoutBtn.disabled = false;
+  }
 }
 
 async function addProduct(event) {
