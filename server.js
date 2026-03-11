@@ -1640,11 +1640,11 @@ async function initSqlite() {
   // Step 1: Minimal CREATE TABLE — no complex columns so it never conflicts with old DBs
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
-    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
+    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS tax_codes (id TEXT PRIMARY KEY, name TEXT NOT NULL, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT DEFAULT 'INR');
-    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0, wholesale_price REAL DEFAULT 0, retail_price REAL DEFAULT 0, mrp REAL DEFAULT 0, barcode TEXT, cess_rate REAL DEFAULT 0, tax_code TEXT, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0, category_id INTEGER, cost_price REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT DEFAULT 'INR', cogs REAL DEFAULT 0, idempotency_key TEXT);
+    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER DEFAULT 0, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0, unit_cost REAL DEFAULT 0, cogs REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, email TEXT);
     CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, supplier_id INTEGER, po_number TEXT, status TEXT, total REAL, created_at TEXT);

@@ -1068,6 +1068,180 @@ function renderZReports(reports) {
       <td style="font-size:0.75rem;color:var(--muted)">${r.notes||"—"}</td>`;
     body.appendChild(tr);
   });
+  
+  // Render charts with the latest reports
+  if (reports.length > 0) {
+    renderZReportCharts(reports);
+  }
+}
+
+// Chart instances (to destroy before recreating)
+let paymentChartInstance = null;
+let trendChartInstance = null;
+
+function renderZReportCharts(reports) {
+  renderPaymentMethodChart(reports);
+  renderTrendChart(reports);
+}
+
+function renderPaymentMethodChart(reports) {
+  const paymentCanvas = document.getElementById("zReportPaymentChart");
+  if (!paymentCanvas) return;
+  
+  // Most recent 30 reports
+  const recentReports = reports.slice(0, 30).reverse();
+  
+  // Aggregate payment methods
+  const totalCash   = recentReports.reduce((s, r) => s + (r.cash_sales || 0), 0);
+  const totalCard   = recentReports.reduce((s, r) => s + (r.card_sales || 0), 0);
+  const totalMobile = recentReports.reduce((s, r) => s + (r.mobile_sales || 0), 0);
+  const totalSplit  = recentReports.reduce((s, r) => s + (r.split_sales || 0), 0);
+  
+  // Destroy existing chart
+  if (paymentChartInstance) {
+    paymentChartInstance.destroy();
+  }
+  
+  const colors = [
+    'rgba(34, 197, 94, 0.8)',   // green (cash)
+    'rgba(59, 130, 246, 0.8)',  // blue (card)
+    'rgba(168, 85, 247, 0.8)',  // purple (mobile)
+    'rgba(249, 115, 22, 0.8)',  // orange (split)
+  ];
+  
+  paymentChartInstance = new Chart(paymentCanvas, {
+    type: 'doughnut',
+    data: {
+      labels: ['Cash', 'Card', 'Mobile', 'Split'],
+      datasets: [{
+        data: [totalCash, totalCard, totalMobile, totalSplit],
+        backgroundColor: colors,
+        borderColor: 'rgba(255, 255, 255, 0.3)',
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            color: 'var(--text-primary, #1f2937)',
+            padding: 15,
+            font: { size: 12 }
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              const value = context.parsed;
+              const total = context.dataset.data.reduce((a, b) => a + b, 0);
+              const percent = ((value / total) * 100).toFixed(1);
+              return `${context.label}: ${money(value)} (${percent}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderTrendChart(reports) {
+  const trendCanvas = document.getElementById("zReportTrendChart");
+  if (!trendCanvas) return;
+  
+  // Most recent 14 reports for daily trend
+  const recentReports = reports.slice(0, 14).reverse();
+  
+  // Destroy existing chart
+  if (trendChartInstance) {
+    trendChartInstance.destroy();
+  }
+  
+  const dates = recentReports.map(r => {
+    const d = new Date(r.report_date);
+    return d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
+  });
+  
+  const salesData = recentReports.map(r => r.total_sales || 0);
+  const taxData = recentReports.map(r => r.total_tax || 0);
+  
+  trendChartInstance = new Chart(trendCanvas, {
+    type: 'line',
+    data: {
+      labels: dates,
+      datasets: [
+        {
+          label: 'Total Sales',
+          data: salesData,
+          borderColor: 'rgba(59, 130, 246, 1)',
+          backgroundColor: 'rgba(59, 130, 246, 0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4,
+          pointBackgroundColor: 'rgba(59, 130, 246, 1)',
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
+        },
+        {
+          label: 'GST Collected',
+          data: taxData,
+          borderColor: 'rgba(168, 85, 247, 1)',
+          backgroundColor: 'rgba(168, 85, 247, 0.1)',
+          borderWidth: 2,
+          fill: false,
+          tension: 0.4,
+          pointBackgroundColor: 'rgba(168, 85, 247, 1)',
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: 'top',
+          labels: {
+            color: 'var(--text-primary, #1f2937)',
+            padding: 15,
+            font: { size: 12 }
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              return `${context.dataset.label}: ${money(context.parsed.y)}`;
+            }
+          }
+        }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: {
+            color: 'var(--text-muted, #6b7280)',
+            callback: function(value) {
+              return money(value);
+            }
+          },
+          grid: {
+            color: 'rgba(0, 0, 0, 0.05)'
+          }
+        },
+        x: {
+          ticks: {
+            color: 'var(--text-muted, #6b7280)'
+          },
+          grid: {
+            display: false
+          }
+        }
+      }
+    }
+  });
 }
 
 async function closeDay(event) {

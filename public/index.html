@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
 </head>
 <body>
 
@@ -544,6 +545,18 @@
                 <div class="field"><span>Notes (optional)</span><input id="zNotes" type="text" placeholder="e.g. Bank drop ₹5000" /></div>
                 <button class="btn" type="submit" style="width:100%;margin-top:0.4rem;background:#6366f1">📋 Generate Z-Report &amp; Close Day</button>
               </form>
+            </div>
+            <div class="pane-card">
+              <div class="pane-card-title">📊 Sales Breakdown Chart</div>
+              <div style="position:relative;height:300px;margin-bottom:1rem">
+                <canvas id="zReportPaymentChart"></canvas>
+              </div>
+            </div>
+            <div class="pane-card">
+              <div class="pane-card-title">📈 Daily Sales Trend</div>
+              <div style="position:relative;height:300px;margin-bottom:1rem">
+                <canvas id="zReportTrendChart"></canvas>
+              </div>
             </div>
             <div class="pane-card">
               <div class="pane-card-title">Past Z-Reports</div>
