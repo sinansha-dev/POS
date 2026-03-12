@@ -274,7 +274,18 @@ function renderReports() {
   if (plEl) {
     const p = r.profitLoss || {};
     const range = r.range?.from ? ` (${r.range.from} → ${r.range.to||"today"})` : " (All time)";
-    plEl.textContent = `${range}\nRevenue:        ${money(p.revenue||0)}\nStock Value:    ${money(p.stockValue||0)}`;
+    const profitColor = (p.profit||0) >= 0 ? "var(--success)" : "var(--danger)";
+    plEl.innerHTML =
+      `<div style="font-size:0.78rem;color:var(--muted);margin-bottom:0.5rem">${range}</div>` +
+      `<div style="display:flex;flex-direction:column;gap:0.35rem">` +
+        `<div style="display:flex;justify-content:space-between"><span>Revenue</span><strong>${money(p.revenue||0)}</strong></div>` +
+        `<div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Wholesale Cost</span><span style="color:var(--danger)">−${money(p.cost||0)}</span></div>` +
+        `<div style="border-top:1px solid var(--border);margin:0.25rem 0"></div>` +
+        `<div style="display:flex;justify-content:space-between"><span><strong>Gross Profit</strong></span><strong style="color:${profitColor}">${money(p.profit||0)}</strong></div>` +
+        `<div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Margin</span><span style="color:${profitColor}">${p.marginPct||0}%</span></div>` +
+        `<div style="border-top:1px solid var(--border);margin:0.25rem 0"></div>` +
+        `<div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">Stock Value</span><span>${money(p.stockValue||0)}</span></div>` +
+      `</div>`;
   }
 
   const bestEl = document.getElementById("bestSellingReport");

@@ -552,6 +552,9 @@ function sqliteFeatureData() {
   const cashSummary    = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales WHERE payment_method != 'REFUND' GROUP BY payment_method ORDER BY amount DESC").all();
   const stockValue     = dbx.prepare("SELECT round(sum(wholesale_price * stock),2) as value FROM products").get()?.value || 0;
   const revenue        = dbx.prepare("SELECT round(sum(total),2) as v FROM sales WHERE payment_method != 'REFUND'").get()?.v || 0;
+  const profit         = dbx.prepare("SELECT round(sum(si.qty * (p.retail_price - p.wholesale_price)),2) as v FROM sale_items si JOIN products p ON p.id = si.product_id WHERE si.sale_id IN (SELECT id FROM sales WHERE payment_method != 'REFUND')").get()?.v || 0;
+  const cost           = +(revenue - profit).toFixed(2);
+  const marginPct      = revenue > 0 ? +((profit / revenue) * 100).toFixed(1) : 0;
 
   return {
     suppliers, purchaseOrders, stockTransfers, stockBatches, customers,
@@ -562,7 +565,7 @@ function sqliteFeatureData() {
       slowMoving,
       taxReport,
       cashSummary,
-      profitLoss: { revenue, stockValue },
+      profitLoss: { revenue, cost, profit, marginPct, stockValue },
     }
   };
 }
@@ -1139,9 +1142,14 @@ async function handleApi(req, res, pathname) {
       const revenue    = dbx.prepare(`SELECT round(sum(total),2) as v FROM sales ${whr}`).get(...args)?.v || 0;
       const stockValue = dbx.prepare("SELECT round(sum(wholesale_price * stock),2) as v FROM products").get()?.v || 0;
 
+      // Profit = (retail_price - wholesale_price) × qty sold
+      const profit    = dbx.prepare(`SELECT round(sum(si.qty * (p.retail_price - p.wholesale_price)),2) as v FROM sale_items si JOIN products p ON p.id = si.product_id WHERE si.sale_id IN (SELECT id FROM sales ${whr})`).get(...args)?.v || 0;
+      const cost      = +(revenue - profit).toFixed(2);
+      const marginPct = revenue > 0 ? +((profit / revenue) * 100).toFixed(1) : 0;
+
       return json(res, 200, { reports: {
         dailySales, monthlyRevenue, bestSelling, slowMoving, taxReport, cashSummary,
-        profitLoss: { revenue, stockValue },
+        profitLoss: { revenue, cost, profit, marginPct, stockValue },
         range: { from: fromDate, to: toDate },
       }});
     }
@@ -1151,7 +1159,7 @@ async function handleApi(req, res, pathname) {
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
     const sales    = await sbQuery("sales", "GET", null, salesFilter) || [];
-    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,wholesale_price,price") || [];
+    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price,retail_price,wholesale_price") || [];
 
     // Build lookup map: sale.id → sale  (used to resolve sale_items)
     const saleById = {};
@@ -1162,7 +1170,7 @@ async function handleApi(req, res, pathname) {
     let items = [];
     if (saleIds.length > 0) {
       items = await sbQuery("sale_items","GET",null,
-        `?select=sale_id,name,qty&sale_id=in.(${saleIds.join(",")})&limit=5000`).catch(()=>[]) || [];
+        `?select=sale_id,product_id,name,qty&sale_id=in.(${saleIds.join(",")})&limit=5000`).catch(()=>[]) || [];
     }
 
     // 30-day window for slow-moving report (separate query)
@@ -1221,6 +1229,22 @@ async function handleApi(req, res, pathname) {
     const stockValue = +products.reduce((a,p)=>
                          a+((p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
 
+    // Profit = (retail_price - wholesale_price) × qty sold
+    const productById = {};
+    for (const p of products) productById[p.id] = p;
+
+    let profit = 0;
+    for (const i of items) {
+      const sale = saleById[i.sale_id];
+      if (!sale || (sale.total||0) < 0 || sale.payment_method === "REFUND") continue;
+      const prod = productById[i.product_id];
+      if (!prod) continue;
+      profit += (i.qty || 0) * ((prod.retail_price || prod.price || 0) - (prod.wholesale_price || 0));
+    }
+    profit = +profit.toFixed(2);
+    const cost      = +(revenue - profit).toFixed(2);
+    const marginPct = revenue > 0 ? +((profit / revenue) * 100).toFixed(1) : 0;
+
     return json(res, 200, { reports: {
       dailySales:     Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       monthlyRevenue: Object.values(monthMap).sort((a,b)=>b.month.localeCompare(a.month)).slice(0,12),
@@ -1228,7 +1252,7 @@ async function handleApi(req, res, pathname) {
       slowMoving,
       taxReport:      Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       cashSummary:    Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
-      profitLoss:     { revenue, stockValue },
+      profitLoss:     { revenue, cost, profit, marginPct, stockValue },
       range:          { from: fromDate, to: toDate },
     }});
   }
