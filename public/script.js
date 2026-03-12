@@ -272,14 +272,14 @@ function renderReports() {
 
   const plEl = document.getElementById("profitLossReport");
   if (plEl) {
-    const p = r.profitLoss||{};
+    const p = r.profitLoss || {};
     const range = r.range?.from ? ` (${r.range.from} → ${r.range.to||"today"})` : " (All time)";
-    plEl.textContent = `${range}\nRevenue:        ${money(p.revenue||0)}\nCost of Goods:  ${money(p.cogs||0)}\n─────────────────────────\nGross Profit:   ${money(p.grossProfit||0)}\nStock Value:    ${money(p.stockValue||0)}`;
+    plEl.textContent = `${range}\nRevenue:        ${money(p.revenue||0)}\nStock Value:    ${money(p.stockValue||0)}`;
   }
 
   const bestEl = document.getElementById("bestSellingReport");
   if (bestEl) bestEl.innerHTML = listHtml((r.bestSelling||[]).slice(0,8), (p,i) =>
-    `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${i+1}. ${p.name}</span><span style="text-align:right"><strong style="color:var(--success)">${p.qty} sold</strong>${p.cogs ? `<br><small style="color:var(--muted)">COGS ${money(p.cogs)}</small>` : ""}</span></li>`);
+    `<li style="display:flex;justify-content:space-between;padding:0.3rem 0"><span style="font-size:0.83rem">${i+1}. ${p.name}</span><strong style="color:var(--success)">${p.qty} sold</strong></li>`);
 
   const slowEl = document.getElementById("slowMovingReport");
   if (slowEl) slowEl.innerHTML = listHtml((r.slowMoving||[]).slice(0,10), p =>
@@ -513,7 +513,6 @@ async function addProduct(event) {
   const wholesalePrice = Number(document.getElementById("productWholesale")?.value || 0);
   const retailPrice    = Number(document.getElementById("productRetail")?.value || 0);
   const mrp            = Number(document.getElementById("productMrp")?.value || 0);
-  const costPrice      = Number(document.getElementById("productCostPrice")?.value || 0) || wholesalePrice;
   const hsnCode        = (cat?.hsn_code || document.getElementById("productHsn")?.value?.trim() || "");
   if (wholesalePrice <= 0) { alert("Wholesale price must be greater than 0."); return; }
   if (retailPrice <= 0)    { alert("Retail price must be greater than 0."); return; }
@@ -526,7 +525,6 @@ async function addProduct(event) {
       barcode:  document.getElementById("productSku").value.trim(),
       wholesalePrice,
       retailPrice,
-      costPrice,
       mrp: mrp || retailPrice,
       stock:    Number(document.getElementById("productStock").value),
       hsnCode,
@@ -839,7 +837,7 @@ function renderInventoryTable() {
     const tr = document.createElement("tr");
     const gstTotal = Number(p.gst_rate || 0) + Number(p.cess_rate || 0);
     const gc = gstTotal >= 18 ? "var(--danger)" : gstTotal > 0 ? "var(--primary)" : "var(--success)";
-    const costDisplay = Number(p.cost_price || p.wholesale_price || p.price || 0);
+    const costDisplay = Number(p.wholesale_price || p.price || 0);
     tr.innerHTML = `
       <td><strong>${p.name}</strong></td>
       <td style="font-family:monospace;font-size:0.8rem">${p.hsn_code||"—"}</td>
@@ -1067,180 +1065,6 @@ function renderZReports(reports) {
       <td style="color:var(--primary)">${money(r.total_tax)}</td>
       <td style="font-size:0.75rem;color:var(--muted)">${r.notes||"—"}</td>`;
     body.appendChild(tr);
-  });
-  
-  // Render charts with the latest reports
-  if (reports.length > 0) {
-    renderZReportCharts(reports);
-  }
-}
-
-// Chart instances (to destroy before recreating)
-let paymentChartInstance = null;
-let trendChartInstance = null;
-
-function renderZReportCharts(reports) {
-  renderPaymentMethodChart(reports);
-  renderTrendChart(reports);
-}
-
-function renderPaymentMethodChart(reports) {
-  const paymentCanvas = document.getElementById("zReportPaymentChart");
-  if (!paymentCanvas) return;
-  
-  // Most recent 30 reports
-  const recentReports = reports.slice(0, 30).reverse();
-  
-  // Aggregate payment methods
-  const totalCash   = recentReports.reduce((s, r) => s + (r.cash_sales || 0), 0);
-  const totalCard   = recentReports.reduce((s, r) => s + (r.card_sales || 0), 0);
-  const totalMobile = recentReports.reduce((s, r) => s + (r.mobile_sales || 0), 0);
-  const totalSplit  = recentReports.reduce((s, r) => s + (r.split_sales || 0), 0);
-  
-  // Destroy existing chart
-  if (paymentChartInstance) {
-    paymentChartInstance.destroy();
-  }
-  
-  const colors = [
-    'rgba(34, 197, 94, 0.8)',   // green (cash)
-    'rgba(59, 130, 246, 0.8)',  // blue (card)
-    'rgba(168, 85, 247, 0.8)',  // purple (mobile)
-    'rgba(249, 115, 22, 0.8)',  // orange (split)
-  ];
-  
-  paymentChartInstance = new Chart(paymentCanvas, {
-    type: 'doughnut',
-    data: {
-      labels: ['Cash', 'Card', 'Mobile', 'Split'],
-      datasets: [{
-        data: [totalCash, totalCard, totalMobile, totalSplit],
-        backgroundColor: colors,
-        borderColor: 'rgba(255, 255, 255, 0.3)',
-        borderWidth: 2,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'bottom',
-          labels: {
-            color: 'var(--text-primary, #1f2937)',
-            padding: 15,
-            font: { size: 12 }
-          }
-        },
-        tooltip: {
-          callbacks: {
-            label: function(context) {
-              const value = context.parsed;
-              const total = context.dataset.data.reduce((a, b) => a + b, 0);
-              const percent = ((value / total) * 100).toFixed(1);
-              return `${context.label}: ${money(value)} (${percent}%)`;
-            }
-          }
-        }
-      }
-    }
-  });
-}
-
-function renderTrendChart(reports) {
-  const trendCanvas = document.getElementById("zReportTrendChart");
-  if (!trendCanvas) return;
-  
-  // Most recent 14 reports for daily trend
-  const recentReports = reports.slice(0, 14).reverse();
-  
-  // Destroy existing chart
-  if (trendChartInstance) {
-    trendChartInstance.destroy();
-  }
-  
-  const dates = recentReports.map(r => {
-    const d = new Date(r.report_date);
-    return d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
-  });
-  
-  const salesData = recentReports.map(r => r.total_sales || 0);
-  const taxData = recentReports.map(r => r.total_tax || 0);
-  
-  trendChartInstance = new Chart(trendCanvas, {
-    type: 'line',
-    data: {
-      labels: dates,
-      datasets: [
-        {
-          label: 'Total Sales',
-          data: salesData,
-          borderColor: 'rgba(59, 130, 246, 1)',
-          backgroundColor: 'rgba(59, 130, 246, 0.1)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.4,
-          pointBackgroundColor: 'rgba(59, 130, 246, 1)',
-          pointBorderColor: '#fff',
-          pointBorderWidth: 2,
-        },
-        {
-          label: 'GST Collected',
-          data: taxData,
-          borderColor: 'rgba(168, 85, 247, 1)',
-          backgroundColor: 'rgba(168, 85, 247, 0.1)',
-          borderWidth: 2,
-          fill: false,
-          tension: 0.4,
-          pointBackgroundColor: 'rgba(168, 85, 247, 1)',
-          pointBorderColor: '#fff',
-          pointBorderWidth: 2,
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: 'top',
-          labels: {
-            color: 'var(--text-primary, #1f2937)',
-            padding: 15,
-            font: { size: 12 }
-          }
-        },
-        tooltip: {
-          callbacks: {
-            label: function(context) {
-              return `${context.dataset.label}: ${money(context.parsed.y)}`;
-            }
-          }
-        }
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: {
-            color: 'var(--text-muted, #6b7280)',
-            callback: function(value) {
-              return money(value);
-            }
-          },
-          grid: {
-            color: 'rgba(0, 0, 0, 0.05)'
-          }
-        },
-        x: {
-          ticks: {
-            color: 'var(--text-muted, #6b7280)'
-          },
-          grid: {
-            display: false
-          }
-        }
-      }
-    }
   });
 }
 

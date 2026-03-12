@@ -9,7 +9,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./style.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
 </head>
 <body>
 
@@ -257,8 +256,7 @@
                       <input id="productRetail" type="number" min="0" step="0.01" placeholder="Auto-fills from Wholesale + GST" />
                     </div>
                   </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem">
-                    <div class="field"><span>Cost Price (₹) <small style="color:var(--muted)">for COGS</small></span><input id="productCostPrice" type="number" min="0" step="0.01" placeholder="= Wholesale if blank" /></div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
                     <div class="field"><span>MRP (₹) <small style="color:var(--muted)">(can equal Retail)</small></span><input id="productMrp" type="number" min="0" step="0.01" placeholder="0.00 = same as Retail" /></div>
                     <div class="field"><span>Initial Stock</span><input id="productStock" type="number" min="0" step="1" placeholder="0" required /></div>
                   </div>
@@ -320,7 +318,7 @@
               </div>
               <div class="pane-table-wrap">
                 <table>
-                  <thead><tr><th>Product</th><th>HSN</th><th>Cost Price</th><th>Retail Price</th><th>MRP</th><th>GST</th><th>Stock</th><th>Delete</th></tr></thead>
+                  <thead><tr><th>Product</th><th>HSN</th><th>Wholesale Price</th><th>Retail Price</th><th>MRP</th><th>GST</th><th>Stock</th><th>Delete</th></tr></thead>
                   <tbody id="inventoryTableBody"></tbody>
                 </table>
               </div>
@@ -495,7 +493,7 @@
               <article><h4>Daily Sales</h4><ul id="dailySalesReport"></ul></article>
               <article><h4>Monthly Revenue</h4><ul id="monthlyRevenueReport"></ul></article>
               <article><h4>Profit &amp; Loss</h4><pre id="profitLossReport"></pre></article>
-              <article><h4>Best Selling (+ COGS)</h4><ul id="bestSellingReport"></ul></article>
+              <article><h4>Best Selling</h4><ul id="bestSellingReport"></ul></article>
               <article><h4>Slow Moving (Last 30 days)</h4><ul id="slowMovingReport"></ul></article>
               <article><h4>Cash Register Summary</h4><ul id="cashSummaryReport"></ul></article>
               <article><h4>Tax Report (GST)</h4><ul id="taxReport"></ul></article>
@@ -545,18 +543,6 @@
                 <div class="field"><span>Notes (optional)</span><input id="zNotes" type="text" placeholder="e.g. Bank drop ₹5000" /></div>
                 <button class="btn" type="submit" style="width:100%;margin-top:0.4rem;background:#6366f1">📋 Generate Z-Report &amp; Close Day</button>
               </form>
-            </div>
-            <div class="pane-card">
-              <div class="pane-card-title">📊 Sales Breakdown Chart</div>
-              <div style="position:relative;height:300px;margin-bottom:1rem">
-                <canvas id="zReportPaymentChart"></canvas>
-              </div>
-            </div>
-            <div class="pane-card">
-              <div class="pane-card-title">📈 Daily Sales Trend</div>
-              <div style="position:relative;height:300px;margin-bottom:1rem">
-                <canvas id="zReportTrendChart"></canvas>
-              </div>
             </div>
             <div class="pane-card">
               <div class="pane-card-title">Past Z-Reports</div>

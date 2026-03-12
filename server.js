@@ -280,72 +280,31 @@ const DB = {
   },
 
   async addProduct(id, payload) {
-    const {
-      name,
-      sku,
-      barcode,
-      wholesalePrice,
-      retailPrice,
-      costPrice,
-      mrp,
-      stock,
-      hsnCode,
-      gstRate,
-      cessRate,
-      taxCode,
-      categoryId,
-    } = payload;
+    const { name, sku, barcode, wholesalePrice, retailPrice, mrp, stock, hsnCode, gstRate, cessRate, taxCode, categoryId } = payload;
     if (SUPABASE_URL) {
       const body = {
-        id,
-        name,
-        sku,
-        barcode,
-        price: retailPrice,
+        id, name, sku, barcode,
+        price:           retailPrice,
         wholesale_price: wholesalePrice,
-        retail_price: retailPrice,
-        cost_price: costPrice || wholesalePrice || 0,
+        retail_price:    retailPrice,
         mrp,
         stock,
-        hsn_code: hsnCode || null,
-        gst_rate: Number(gstRate || 0),
-        cess_rate: Number(cessRate || 0),
-        tax_code: taxCode || null,
+        hsn_code:    hsnCode   || null,
+        gst_rate:    Number(gstRate  || 0),
+        cess_rate:   Number(cessRate || 0),
+        tax_code:    taxCode    || null,
         category_id: categoryId || null,
       };
       try {
         await sbQuery("products", "POST", body);
       } catch {
-        await sbQuery("products", "POST", {
-          id,
-          name,
-          sku,
-          price: retailPrice,
-          stock,
-          hsn_code: hsnCode || null,
-          gst_rate: Number(gstRate || 0),
-          category_id: categoryId || null,
-        });
+        // Fallback for Supabase schemas missing optional columns
+        await sbQuery("products", "POST", { id, name, sku, price: retailPrice, stock, hsn_code: hsnCode||null, gst_rate: Number(gstRate||0), category_id: categoryId||null });
       }
     } else {
-      getDb().prepare("INSERT INTO products (id, name, sku, barcode, price, wholesale_price, retail_price, cost_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(
-          id,
-          name,
-          sku,
-          barcode,
-          retailPrice,
-          wholesalePrice,
-          retailPrice,
-          costPrice || wholesalePrice || 0,
-          mrp,
-          stock,
-          hsnCode || null,
-          Number(gstRate || 0),
-          Number(cessRate || 0),
-          taxCode || null,
-          categoryId || null
-        );
+      getDb().prepare(
+        "INSERT INTO products (id, name, sku, barcode, price, wholesale_price, retail_price, mrp, stock, hsn_code, gst_rate, cess_rate, tax_code, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(id, name, sku, barcode, retailPrice, wholesalePrice, retailPrice, mrp, stock, hsnCode||null, Number(gstRate||0), Number(cessRate||0), taxCode||null, categoryId||null);
     }
   },
 
@@ -429,11 +388,11 @@ const DB = {
       return rows?.[0]?.id;
     }
     const info = getDb().prepare(`
-      INSERT INTO sales (receipt_no, timestamp, cashier, payment_method, subtotal, discount, tax, total, received, change_amount, currency, cogs, idempotency_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sales (receipt_no, timestamp, cashier, payment_method, subtotal, discount, tax, total, received, change_amount, currency, idempotency_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(sale.receipt_no, sale.timestamp, sale.cashier, sale.payment_method,
            sale.subtotal, sale.discount, sale.tax, sale.total, sale.received, sale.change_amount,
-           sale.currency, sale.cogs ?? 0, sale.idempotency_key ?? null);
+           sale.currency, sale.idempotency_key ?? null);
     return info.lastInsertRowid;
   },
 
@@ -441,9 +400,9 @@ const DB = {
     if (SUPABASE_URL) {
       await sbQuery("sale_items", "POST", item);
     } else {
-      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty, hsn_code, gst_rate, unit_cost, cogs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      getDb().prepare("INSERT INTO sale_items (sale_id, product_id, name, price, qty, hsn_code, gst_rate) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(item.sale_id, item.product_id, item.name, item.price, item.qty,
-             item.hsn_code||null, item.gst_rate||0, item.unit_cost||0, item.cogs||0);
+             item.hsn_code || null, item.gst_rate || 0);
     }
   },
 
@@ -523,48 +482,12 @@ const DB = {
   async getProductFull(id) {
     if (SUPABASE_URL) {
       const rows = await sbQuery("products", "GET", null,
-        `?id=eq.${id}&select=id,name,sku,price,retail_price,wholesale_price,gst_rate,cess_rate,hsn_code,stock,cost_price&limit=1`);
+        `?id=eq.${id}&select=id,name,sku,price,retail_price,wholesale_price,gst_rate,cess_rate,hsn_code,stock&limit=1`);
       return rows?.[0] || null;
     }
     return getDb().prepare(
-      "SELECT id, name, sku, price, retail_price, wholesale_price, gst_rate, cess_rate, hsn_code, stock, cost_price FROM products WHERE id=?"
+      "SELECT id, name, sku, price, retail_price, wholesale_price, gst_rate, cess_rate, hsn_code, stock FROM products WHERE id=?"
     ).get(id);
-  },
-
-  // ── COST BATCHES (FIFO) ──────────────────────────────────────
-  async insertCostBatch(productId, unitCost, qty) {
-    const row = { product_id: productId, unit_cost: unitCost, qty_remaining: qty, created_at: new Date().toISOString() };
-    if (SUPABASE_URL) {
-      await sbQuery("cost_batches", "POST", row).catch(() => {});
-    } else {
-      getDb().prepare("INSERT INTO cost_batches (product_id, unit_cost, qty_remaining, created_at) VALUES (?,?,?,?)")
-        .run(productId, unitCost, qty, row.created_at);
-    }
-  },
-
-  // Returns { totalCogs } and updates batch qty_remaining in SQLite.
-  // For Supabase returns best-effort COGS from product.cost_price.
-  async consumeFifoCogs(productId, qtyNeeded, fallbackCost) {
-    if (SUPABASE_URL) {
-      // Supabase: use product cost_price as FIFO approximation
-      return +(fallbackCost * qtyNeeded).toFixed(2);
-    }
-    const dbx = getDb();
-    const batches = dbx.prepare(
-      "SELECT id, unit_cost, qty_remaining FROM cost_batches WHERE product_id=? AND qty_remaining > 0 ORDER BY created_at ASC, id ASC"
-    ).all(productId);
-    let remaining = qtyNeeded;
-    let totalCogs = 0;
-    for (const batch of batches) {
-      if (remaining <= 0) break;
-      const use = Math.min(remaining, batch.qty_remaining);
-      totalCogs += use * batch.unit_cost;
-      dbx.prepare("UPDATE cost_batches SET qty_remaining = qty_remaining - ? WHERE id=?").run(use, batch.id);
-      remaining -= use;
-    }
-    // If no batches, fall back to cost_price column
-    if (remaining > 0) totalCogs += remaining * fallbackCost;
-    return +totalCogs.toFixed(2);
   },
 
   // ── Z-REPORT ─────────────────────────────────────────────────
@@ -623,13 +546,12 @@ function sqliteFeatureData() {
 
   const dailySales = dbx.prepare("SELECT date(timestamp) as day, round(sum(total),2) as revenue, count(*) as transactions FROM sales WHERE payment_method != 'REFUND' GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
   const monthlyRevenue = dbx.prepare("SELECT substr(timestamp,1,7) as month, round(sum(total),2) as revenue FROM sales WHERE payment_method != 'REFUND' GROUP BY substr(timestamp,1,7) ORDER BY month DESC LIMIT 12").all();
-  const bestSelling = dbx.prepare("SELECT si.name, sum(si.qty) as qty, round(sum(si.cogs),2) as cogs FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.payment_method != 'REFUND' GROUP BY si.name ORDER BY qty DESC LIMIT 10").all();
-  const slowMoving = dbx.prepare("SELECT p.name, p.sku, p.stock, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id AND si.sale_id IN (SELECT id FROM sales WHERE payment_method != 'REFUND') WHERE p.stock > 0 GROUP BY p.id ORDER BY qty ASC, p.stock DESC LIMIT 10").all();
-  const taxReport = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales WHERE payment_method != 'REFUND' GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
-  const cashSummary = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales WHERE payment_method != 'REFUND' GROUP BY payment_method ORDER BY amount DESC").all();
-  const stockValue = dbx.prepare("SELECT round(sum(price * stock),2) as value FROM products").get()?.value || 0;
-  const revenue = dbx.prepare("SELECT round(sum(total),2) as v FROM sales WHERE payment_method != 'REFUND'").get()?.v || 0;
-  const cogs = dbx.prepare("SELECT round(sum(cogs),2) as v FROM sale_items").get()?.v || 0;
+  const bestSelling    = dbx.prepare("SELECT si.name, sum(si.qty) as qty FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.payment_method != 'REFUND' GROUP BY si.name ORDER BY qty DESC LIMIT 10").all();
+  const slowMoving     = dbx.prepare("SELECT p.name, p.sku, p.stock, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id AND si.sale_id IN (SELECT id FROM sales WHERE payment_method != 'REFUND') WHERE p.stock > 0 GROUP BY p.id ORDER BY qty ASC, p.stock DESC LIMIT 10").all();
+  const taxReport      = dbx.prepare("SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales WHERE payment_method != 'REFUND' GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14").all();
+  const cashSummary    = dbx.prepare("SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales WHERE payment_method != 'REFUND' GROUP BY payment_method ORDER BY amount DESC").all();
+  const stockValue     = dbx.prepare("SELECT round(sum(wholesale_price * stock),2) as value FROM products").get()?.value || 0;
+  const revenue        = dbx.prepare("SELECT round(sum(total),2) as v FROM sales WHERE payment_method != 'REFUND'").get()?.v || 0;
 
   return {
     suppliers, purchaseOrders, stockTransfers, stockBatches, customers,
@@ -640,7 +562,7 @@ function sqliteFeatureData() {
       slowMoving,
       taxReport,
       cashSummary,
-      profitLoss: { revenue, cogs, grossProfit: Number((revenue - cogs).toFixed(2)), stockValue }
+      profitLoss: { revenue, stockValue },
     }
   };
 }
@@ -677,14 +599,13 @@ async function computeSaleTotals(rawItems, discountPct = 0) {
     totalTax  += lineTax;
 
     enriched.push({
-      productId:   p.id,
-      name:        p.name,
-      price:       unitPrice,
+      productId: p.id,
+      name:      p.name,
+      price:     unitPrice,
       qty,
-      hsnCode:     p.hsn_code   || "",
-      gstRate:     p.gst_rate   || 0,
-      cessRate:    p.cess_rate  || 0,
-      costPrice:   Number(p.cost_price || p.wholesale_price || 0),
+      hsnCode:   p.hsn_code  || "",
+      gstRate:   p.gst_rate  || 0,
+      cessRate:  p.cess_rate || 0,
     });
   }
 
@@ -771,17 +692,14 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/products" && req.method === "POST") {
     if (!requireAdmin(req)) return json(res, 403, { error: "Admin only." });
     const body = await parseBody(req);
-    const { name, sku, barcode, wholesalePrice, retailPrice: rawRetail, costPrice: rawCostPrice, mrp, stock, hsnCode, gstRate, cessRate, categoryId } = body;
+    const { name, sku, barcode, wholesalePrice, retailPrice: rawRetail, mrp, stock, hsnCode, gstRate, cessRate, categoryId } = body;
     if (!name || !sku || isNaN(Number(wholesalePrice)) || isNaN(Number(mrp)) || isNaN(Number(stock))) return json(res, 400, { error: "Invalid product." });
     if (name.length > 100 || sku.length > 50) return json(res, 400, { error: "Input too long." });
-    const wholesale = Number(wholesalePrice);
-    const gst = Number(gstRate || 0);
-    const cess = Number(cessRate || 0);
-    // Use retailPrice from frontend (user-editable); fallback to auto-calc
+    const wholesale  = Number(wholesalePrice);
+    const gst        = Number(gstRate || 0);
+    const cess       = Number(cessRate || 0);
     const retailPrice = rawRetail ? Number(rawRetail) : +(wholesale + (wholesale * (gst + cess) / 100)).toFixed(2);
-    // costPrice: explicit value from form, or fallback to wholesale
-    const costPrice = rawCostPrice && Number(rawCostPrice) > 0 ? Number(rawCostPrice) : wholesale;
-    const mrpVal = Number(mrp);
+    const mrpVal     = Number(mrp);
     // MRP of 0 means user didn't set it — default to retail. Otherwise retail must be <= MRP.
     const finalMrp = mrpVal <= 0 ? retailPrice : mrpVal;
     if (retailPrice > finalMrp) return json(res, 400, { error: "Retail price cannot exceed MRP." });
@@ -789,11 +707,10 @@ async function handleApi(req, res, pathname) {
     try {
       await DB.addProduct(crypto.randomUUID(), {
         name: name.trim(),
-        sku: sku.trim(),
-        barcode: String(barcode || sku).trim(),
+        sku:  sku.trim(),
+        barcode:      String(barcode || sku).trim(),
         wholesalePrice: wholesale,
         retailPrice,
-        costPrice,
         mrp: finalMrp,
         stock: Number(stock),
         hsnCode: String(hsnCode || "").trim(),
@@ -909,43 +826,25 @@ async function handleApi(req, res, pathname) {
         }
 
         if (!txUserErr) {
-          const count = dbx.prepare("SELECT COUNT(*) c FROM sales").get().c || 0;
+          const count     = dbx.prepare("SELECT COUNT(*) c FROM sales").get().c || 0;
           const receiptNo = `R-${String(count + 1).padStart(5, "0")}`;
-          let totalCogs = 0;
 
           const saleInfo = dbx.prepare(`
             INSERT INTO sales (receipt_no, timestamp, cashier, payment_method,
-              subtotal, discount, tax, total, received, change_amount, currency, cogs, idempotency_key)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+              subtotal, discount, tax, total, received, change_amount, currency, idempotency_key)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
           `).run(receiptNo, timestamp, user.username, paymentMethod,
                  subtotal, discount, tax, total, received, changeAmount,
-                 sale.currency || "INR", 0, idempotencyKey);
+                 sale.currency || "INR", idempotencyKey);
           const saleId = saleInfo.lastInsertRowid;
 
           for (const item of enrichedItems) {
-            // FIFO COGS: oldest batches first, fall back to cost_price
-            let rem = item.qty, itemCogs = 0;
-            const batches = dbx.prepare(
-              "SELECT id, unit_cost, qty_remaining FROM cost_batches WHERE product_id=? AND qty_remaining > 0 ORDER BY created_at ASC, id ASC"
-            ).all(item.productId);
-            for (const b of batches) {
-              if (rem <= 0) break;
-              const use = Math.min(rem, b.qty_remaining);
-              itemCogs += use * b.unit_cost;
-              dbx.prepare("UPDATE cost_batches SET qty_remaining = qty_remaining - ? WHERE id=?").run(use, b.id);
-              rem -= use;
-            }
-            if (rem > 0) itemCogs += rem * item.costPrice;
-            itemCogs   = +itemCogs.toFixed(2);
-            totalCogs += itemCogs;
-
             dbx.prepare(
-              "INSERT INTO sale_items (sale_id, product_id, name, price, qty, hsn_code, gst_rate, unit_cost, cogs) VALUES (?,?,?,?,?,?,?,?,?)"
+              "INSERT INTO sale_items (sale_id, product_id, name, price, qty, hsn_code, gst_rate) VALUES (?,?,?,?,?,?,?)"
             ).run(saleId, item.productId, item.name, item.price, item.qty,
-                  item.hsnCode || null, item.gstRate || 0, item.costPrice, itemCogs);
+                  item.hsnCode || null, item.gstRate || 0);
           }
 
-          dbx.prepare("UPDATE sales SET cogs=? WHERE id=?").run(+totalCogs.toFixed(2), saleId);
           txResult = { ok: true, receiptNo, timestamp, subtotal, tax, discount, total, paymentMethod, items: enrichedItems };
         }
 
@@ -975,25 +874,18 @@ async function handleApi(req, res, pathname) {
     const count     = await DB.getSalesCount();
     const receiptNo = `R-${String(count + 1).padStart(5, "0")}`;
 
-    // Compute COGS via cost_price fallback
-    let totalCogs = 0;
-    for (const item of enrichedItems) totalCogs += item.costPrice * item.qty;
-    totalCogs = +totalCogs.toFixed(2);
-
     const saleId = await DB.insertSale({
-      receipt_no:     receiptNo,
+      receipt_no:      receiptNo,
       timestamp,
-      cashier:        user.username,
-      payment_method: paymentMethod,
+      cashier:         user.username,
+      payment_method:  paymentMethod,
       subtotal, discount, tax, total, received,
-      change_amount:  changeAmount,
-      currency:       sale.currency || "INR",
-      cogs:           totalCogs,
+      change_amount:   changeAmount,
+      currency:        sale.currency || "INR",
       idempotency_key: idempotencyKey,
     });
 
     for (const item of enrichedItems) {
-      const itemCogs = +(item.costPrice * item.qty).toFixed(2);
       await DB.insertSaleItem({
         sale_id:    saleId,
         product_id: item.productId,
@@ -1002,8 +894,6 @@ async function handleApi(req, res, pathname) {
         qty:        item.qty,
         hsn_code:   item.hsnCode || null,
         gst_rate:   item.gstRate || 0,
-        unit_cost:  item.costPrice,
-        cogs:       itemCogs,
       });
     }
 
@@ -1241,31 +1131,27 @@ async function handleApi(req, res, pathname) {
       const taxReport      = dbx.prepare(`SELECT date(timestamp) as day, round(sum(tax),2) as gst FROM sales ${whr} GROUP BY date(timestamp) ORDER BY day DESC LIMIT 14`).all(...args);
       const cashSummary    = dbx.prepare(`SELECT payment_method as method, round(sum(total),2) as amount, count(*) as count FROM sales ${whr} GROUP BY payment_method ORDER BY amount DESC`).all(...args);
 
-      // COGS from actual sale_items (FIFO consumed values)
-      const itemArgs = [...args];
-      let   itemWhr  = "si.sale_id IN (SELECT id FROM sales " + whr + ")";
-      const bestSelling = dbx.prepare(`SELECT si.name, sum(si.qty) as qty, round(sum(si.cogs),2) as cogs FROM sale_items si WHERE ${itemWhr} GROUP BY si.name ORDER BY qty DESC LIMIT 10`).all(...itemArgs);
+      const itemArgs    = [...args];
+      let   itemWhr     = "si.sale_id IN (SELECT id FROM sales " + whr + ")";
+      const bestSelling = dbx.prepare(`SELECT si.name, sum(si.qty) as qty FROM sale_items si WHERE ${itemWhr} GROUP BY si.name ORDER BY qty DESC LIMIT 10`).all(...itemArgs);
       const slowMoving  = dbx.prepare(`SELECT p.name, p.sku, p.stock, coalesce(sum(si.qty),0) as qty FROM products p LEFT JOIN sale_items si ON si.product_id = p.id AND si.sale_id IN (SELECT id FROM sales ${whr}) WHERE p.stock > 0 GROUP BY p.id ORDER BY qty ASC, p.stock DESC LIMIT 10`).all(...args);
 
       const revenue    = dbx.prepare(`SELECT round(sum(total),2) as v FROM sales ${whr}`).get(...args)?.v || 0;
-      const cogs       = dbx.prepare(`SELECT round(sum(si.cogs),2) as v FROM sale_items si WHERE ${itemWhr}`).get(...itemArgs)?.v || 0;
-      const stockValue = dbx.prepare("SELECT round(sum(cost_price * stock),2) as v FROM products WHERE cost_price > 0").get()?.v
-                      || dbx.prepare("SELECT round(sum(wholesale_price * stock),2) as v FROM products").get()?.v || 0;
+      const stockValue = dbx.prepare("SELECT round(sum(wholesale_price * stock),2) as v FROM products").get()?.v || 0;
 
       return json(res, 200, { reports: {
         dailySales, monthlyRevenue, bestSelling, slowMoving, taxReport, cashSummary,
-        profitLoss: { revenue, cogs, grossProfit: +((revenue||0)-(cogs||0)).toFixed(2), stockValue },
+        profitLoss: { revenue, stockValue },
         range: { from: fromDate, to: toDate },
       }});
     }
 
-    // ── Supabase path — no FK joins; fetch and cross-reference in code ──────
-    let salesFilter = "?select=id,timestamp,total,tax,payment_method,subtotal,cogs&order=timestamp.desc&limit=1000";
+    let salesFilter = "?select=id,timestamp,total,tax,payment_method,subtotal&order=timestamp.desc&limit=1000";
     if (fromDate) salesFilter += `&timestamp=gte.${fromDate}T00:00:00`;
     if (toDate)   salesFilter += `&timestamp=lte.${toDate}T23:59:59`;
 
     const sales    = await sbQuery("sales", "GET", null, salesFilter) || [];
-    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,price,cost_price,wholesale_price") || [];
+    const products = await sbQuery("products","GET",null,"?select=id,name,sku,stock,wholesale_price,price") || [];
 
     // Build lookup map: sale.id → sale  (used to resolve sale_items)
     const saleById = {};
@@ -1276,7 +1162,7 @@ async function handleApi(req, res, pathname) {
     let items = [];
     if (saleIds.length > 0) {
       items = await sbQuery("sale_items","GET",null,
-        `?select=sale_id,name,qty,cogs&sale_id=in.(${saleIds.join(",")})&limit=5000`).catch(()=>[]) || [];
+        `?select=sale_id,name,qty&sale_id=in.(${saleIds.join(",")})&limit=5000`).catch(()=>[]) || [];
     }
 
     // 30-day window for slow-moving report (separate query)
@@ -1291,7 +1177,6 @@ async function handleApi(req, res, pathname) {
           `?select=sale_id,name,qty&sale_id=in.(${[...recentSaleIds].join(",")})&limit=3000`).catch(()=>[]) || []
       : [];
 
-    const cutoff30Str = cutoff30 + "T00:00:00";
     const dailyMap={}, monthMap={}, taxMap={}, cashMap={}, itemMap={};
 
     for (const s of sales) {
@@ -1316,9 +1201,8 @@ async function handleApi(req, res, pathname) {
       const sale = saleById[i.sale_id];
       if (!sale) continue;
       if ((sale.total||0) < 0 || sale.payment_method === "REFUND") continue;
-      if (!itemMap[i.name]) itemMap[i.name] = { name:i.name, qty:0, cogs:0 };
-      itemMap[i.name].qty  += i.qty  || 0;
-      itemMap[i.name].cogs  = +((itemMap[i.name].cogs||0) + (i.cogs||0)).toFixed(2);
+      if (!itemMap[i.name]) itemMap[i.name] = { name:i.name, qty:0 };
+      itemMap[i.name].qty += i.qty || 0;
     }
 
     // Slow-moving: sold qty per product in last 30 days
@@ -1334,10 +1218,8 @@ async function handleApi(req, res, pathname) {
 
     const revenue    = +sales.filter(s=>(s.total||0)>0 && s.payment_method !== "REFUND")
                              .reduce((a,s)=>a+(s.total||0),0).toFixed(2);
-    const cogs       = +sales.filter(s=>(s.total||0)>=0 && s.payment_method !== "REFUND")
-                             .reduce((a,s)=>a+(s.cogs||0),0).toFixed(2);
     const stockValue = +products.reduce((a,p)=>
-                         a+((p.cost_price||p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
+                         a+((p.wholesale_price||p.price||0)*(p.stock||0)),0).toFixed(2);
 
     return json(res, 200, { reports: {
       dailySales:     Object.values(dailyMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
@@ -1346,7 +1228,7 @@ async function handleApi(req, res, pathname) {
       slowMoving,
       taxReport:      Object.values(taxMap).sort((a,b)=>b.day.localeCompare(a.day)).slice(0,14),
       cashSummary:    Object.values(cashMap).sort((a,b)=>b.amount-a.amount),
-      profitLoss:     { revenue, cogs, grossProfit:+(revenue-cogs).toFixed(2), stockValue },
+      profitLoss:     { revenue, stockValue },
       range:          { from: fromDate, to: toDate },
     }});
   }
@@ -1460,19 +1342,6 @@ async function handleApi(req, res, pathname) {
 
     await DB.writeAudit({ actor: admin.username, action: "STOCK_ADJUST", entityType: "product",
       entityId: sku, before: { stock: oldStock }, after: { stock: Number(stock) }, note: reason||null });
-
-    // Seed a cost batch if stock went up and cost_price is set
-    if (oldStock !== null && Number(stock) > oldStock) {
-      const addedQty = Number(stock) - oldStock;
-      let costPrice = 0;
-      if (SUPABASE_URL) {
-        const p = await sbQuery("products","GET",null,`?id=eq.${productId}&select=cost_price&limit=1`).catch(()=>null);
-        costPrice = p?.[0]?.cost_price || 0;
-      } else {
-        costPrice = getDb().prepare("SELECT cost_price FROM products WHERE id=?").get(productId)?.cost_price || 0;
-      }
-      if (costPrice > 0 && productId) await DB.insertCostBatch(productId, costPrice, addedQty);
-    }
 
     return json(res, 200, { ok: true });
   }
@@ -1640,11 +1509,11 @@ async function initSqlite() {
   // Step 1: Minimal CREATE TABLE — no complex columns so it never conflicts with old DBs
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, role TEXT);
-    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL);
     CREATE TABLE IF NOT EXISTS tax_codes (id TEXT PRIMARY KEY, name TEXT NOT NULL, gst_rate REAL DEFAULT 0, cess_rate REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0, wholesale_price REAL DEFAULT 0, retail_price REAL DEFAULT 0, mrp REAL DEFAULT 0, barcode TEXT, cess_rate REAL DEFAULT 0, tax_code TEXT, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0, category_id INTEGER, cost_price REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT DEFAULT 'INR', cogs REAL DEFAULT 0, idempotency_key TEXT);
-    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER DEFAULT 0, hsn_code TEXT DEFAULT '', gst_rate REAL DEFAULT 0, unit_cost REAL DEFAULT 0, cogs REAL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, name TEXT, sku TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY, receipt_no TEXT UNIQUE, timestamp TEXT, cashier TEXT, payment_method TEXT, subtotal REAL, discount REAL, tax REAL, total REAL, received REAL, change_amount REAL, currency TEXT DEFAULT 'INR');
+    CREATE TABLE IF NOT EXISTS sale_items (id INTEGER PRIMARY KEY, sale_id INTEGER, product_id TEXT, name TEXT, price REAL, qty INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, email TEXT);
     CREATE TABLE IF NOT EXISTS purchase_orders (id INTEGER PRIMARY KEY, supplier_id INTEGER, po_number TEXT, status TEXT, total REAL, created_at TEXT);
@@ -1656,7 +1525,7 @@ async function initSqlite() {
     CREATE TABLE IF NOT EXISTS cost_batches (id INTEGER PRIMARY KEY, product_id TEXT NOT NULL, unit_cost REAL NOT NULL, qty_remaining INTEGER NOT NULL, created_at TEXT NOT NULL);
   `);
 
-  // Step 2: Add every column that may be missing from old schemas (silent no-op if already exists)
+  // Step 2: Add columns missing from older schemas (silent no-op if already exists)
   const ensureCol = (sql) => { try { db.exec(sql); } catch {} };
   ensureCol("ALTER TABLE categories ADD COLUMN hsn_code TEXT NOT NULL DEFAULT ''");
   ensureCol("ALTER TABLE categories ADD COLUMN gst_rate  REAL DEFAULT 0");
@@ -1671,14 +1540,8 @@ async function initSqlite() {
   ensureCol("ALTER TABLE products   ADD COLUMN category_id     INTEGER");
   ensureCol("ALTER TABLE sale_items ADD COLUMN hsn_code        TEXT DEFAULT ''");
   ensureCol("ALTER TABLE sale_items ADD COLUMN gst_rate        REAL DEFAULT 0");
-  ensureCol("ALTER TABLE sale_items ADD COLUMN unit_cost       REAL DEFAULT 0");
-  ensureCol("ALTER TABLE sale_items ADD COLUMN cogs            REAL DEFAULT 0");
   ensureCol("ALTER TABLE sales      ADD COLUMN idempotency_key TEXT");
-  ensureCol("ALTER TABLE sales      ADD COLUMN cogs            REAL DEFAULT 0");
-  ensureCol("ALTER TABLE products   ADD COLUMN cost_price      REAL DEFAULT 0");
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_idempotency ON sales(idempotency_key) WHERE idempotency_key IS NOT NULL"); } catch {}
-
-  // Step 3: Backfill NULLs so all rows are usable
   db.exec("UPDATE products  SET barcode         = sku   WHERE barcode         IS NULL OR barcode         = ''");
   db.exec("UPDATE products  SET hsn_code        = ''    WHERE hsn_code        IS NULL");
   db.exec("UPDATE products  SET gst_rate        = 0     WHERE gst_rate        IS NULL");
